@@ -1,4 +1,3 @@
-
 <!DOCTYPE html>
 <html lang="fr">
 <head>
@@ -183,6 +182,7 @@
 <div id="modal-root"></div>
 <div id="toast" class="toast"></div>
 
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script>
 /* ============================================================
    AGIRS — Application d'entraînement (single file, IndexedDB)
@@ -232,8 +232,89 @@ const DB = (() => {
   function get(store,id){return new Promise((res,rej)=>{const r=tx(store,'readonly').get(id);r.onsuccess=()=>res(r.result);r.onerror=()=>rej(r.error);});}
   function put(store,obj){return new Promise((res,rej)=>{const r=tx(store,'readwrite').put(obj);r.onsuccess=()=>res(obj);r.onerror=()=>rej(r.error);});}
   function del(store,id){return new Promise((res,rej)=>{const r=tx(store,'readwrite').delete(id);r.onsuccess=()=>res();r.onerror=()=>rej(r.error);});}
-  return {open,all,get,put,del};
+  function clear(store){return new Promise((res,rej)=>{const r=tx(store,'readwrite').clear();r.onsuccess=()=>res();r.onerror=()=>rej(r.error);});}
+  return {open,all,get,put,del,clear};
 })();
+
+/* ============================================================
+   Supabase (cloud) — synchro des donnees
+   ============================================================ */
+const SUPA_URL = 'https://kehvxapkbrkzaavrvdpt.supabase.co';
+const SUPA_KEY = 'sb_publishable_ACMnhG_N7a2P99IsjS523w_J7tMyHJx';
+const CLOUD_MAP = { gymnasts:'coaching_gymnasts', programs:'coaching_programs', fullPrograms:'coaching_full_programs' };
+let sb=null, CLOUD_ENABLED=false;
+try{
+  if(window.supabase && window.supabase.createClient){
+    sb = window.supabase.createClient(SUPA_URL, SUPA_KEY, {auth:{persistSession:false}});
+    CLOUD_ENABLED = true;
+  }
+}catch(e){ console.warn("Supabase init impossible:", e); }
+
+const Cloud = {
+  online:false,
+  async pullEverything(){
+    if(!sb) throw new Error("no client");
+    const [g,p,fp,kv] = await Promise.all([
+      sb.from("coaching_gymnasts").select("data"),
+      sb.from("coaching_programs").select("data"),
+      sb.from("coaching_full_programs").select("data"),
+      sb.from("coaching_kv").select("id,data"),
+    ]);
+    for(const r of [g,p,fp,kv]){ if(r.error) throw r.error; }
+    const kvMap={}; (kv.data||[]).forEach(r=>{ kvMap[r.id]=r.data; });
+    return {
+      gymnasts:(g.data||[]).map(r=>r.data),
+      programs:(p.data||[]).map(r=>r.data),
+      fullPrograms:(fp.data||[]).map(r=>r.data),
+      settings:kvMap["settings"]||null,
+      folders:kvMap["folders"]||null,
+    };
+  },
+  async upsert(store,obj){ if(!sb) return; const t=CLOUD_MAP[store]; const {error}=await sb.from(t).upsert({id:obj.id,data:obj,updated_at:new Date().toISOString()}); if(error) throw error; },
+  async upsertKV(key,val){ if(!sb) return; const {error}=await sb.from("coaching_kv").upsert({id:key,data:val,updated_at:new Date().toISOString()}); if(error) throw error; },
+  async remove(store,id){ if(!sb) return; const t=CLOUD_MAP[store]; const {error}=await sb.from(t).delete().eq("id",id); if(error) throw error; },
+};
+
+let _cloudBadge=null;
+function setCloudBadge(elm){ _cloudBadge=elm; paintCloudBadge(); }
+function paintCloudBadge(){
+  if(!_cloudBadge) return;
+  if(!CLOUD_ENABLED){ _cloudBadge.textContent="Local"; _cloudBadge.style.background="#6b7391"; _cloudBadge.title="Cloud desactive"; }
+  else if(Cloud.online){ _cloudBadge.textContent="\u2601 Cloud"; _cloudBadge.style.background="#2e9e5b"; _cloudBadge.title="Donnees synchronisees"; }
+  else { _cloudBadge.textContent="\u26a0 Hors-ligne"; _cloudBadge.style.background="#c8302f"; _cloudBadge.title="Pas de connexion au cloud"; }
+}
+function cloudOK(){ if(!Cloud.online){ Cloud.online=true; paintCloudBadge(); } }
+function cloudFail(e){ console.warn("cloud:", e); if(Cloud.online){ Cloud.online=false; paintCloudBadge(); } }
+function cloudPush(store,obj){ if(!CLOUD_ENABLED) return; Cloud.upsert(store,obj).then(cloudOK).catch(cloudFail); }
+function cloudPushKV(key,val){ if(!CLOUD_ENABLED) return; Cloud.upsertKV(key,val).then(cloudOK).catch(cloudFail); }
+function cloudRemove(store,id){ if(!CLOUD_ENABLED) return; Cloud.remove(store,id).then(cloudOK).catch(cloudFail); }
+
+async function pushAllToCloud(){
+  const jobs=[];
+  S.gymnasts.forEach(g=>jobs.push(Cloud.upsert("gymnasts",g)));
+  S.programs.forEach(p=>jobs.push(Cloud.upsert("programs",p)));
+  S.fullPrograms.forEach(p=>jobs.push(Cloud.upsert("fullPrograms",p)));
+  jobs.push(Cloud.upsertKV("settings",S.settings));
+  jobs.push(Cloud.upsertKV("folders",S.folders));
+  await Promise.all(jobs);
+  Cloud.online=true; paintCloudBadge();
+}
+async function cacheToLocal(){
+  try{
+    await DB.clear("gymnasts"); await DB.clear("programs"); await DB.clear("fullPrograms");
+    for(const g of S.gymnasts) await DB.put("gymnasts",g);
+    for(const p of S.programs) await DB.put("programs",p);
+    for(const p of S.fullPrograms) await DB.put("fullPrograms",p);
+    await DB.put("kv",{id:"settings",value:S.settings});
+    await DB.put("kv",{id:"folders",value:S.folders});
+  }catch(e){ console.warn("cache local:", e); }
+}
+function normalizeFolders(arr){
+  let f = arr || JSON.parse(JSON.stringify(DEFAULT_FOLDERS));
+  if(f.length && typeof f[0]==="string"){ f = f.map(str=>({id:str, name:str.charAt(0).toUpperCase()+str.slice(1), parent:null})); }
+  DEFAULT_FOLDERS.forEach(d=>{ if(!f.some(x=>x.id===d.id)) f.push({...d}); });
+  return f;
+}
 
 /* ============================================================
    State
@@ -272,29 +353,50 @@ function allFoldersSorted(){ return S.folders.slice().sort((a,b)=>folderPathLabe
    Load / persist
    ============================================================ */
 async function loadAll(){
-  const kvSettings = await DB.get('kv','settings');
-  S.settings = kvSettings?.value || {...DEFAULT_SETTINGS};
-  const kvFolders = await DB.get('kv','folders');
-  let loadedFolders = kvFolders?.value || JSON.parse(JSON.stringify(DEFAULT_FOLDERS));
-  // migration: ancien format = tableau de chaines
-  if(loadedFolders.length && typeof loadedFolders[0]==='string'){
-    loadedFolders = loadedFolders.map(str=>({id:str, name:str.charAt(0).toUpperCase()+str.slice(1), parent:null}));
+  // Logo + medias : toujours en local (les videos iront sur R2 a l'etape suivante)
+  const kvLogo = await DB.get("kv","logo");
+  if(kvLogo && kvLogo.blob){ S.logo = URL.createObjectURL(kvLogo.blob); }
+  S.media = await DB.all("media");
+
+  // Donnees locales (cache / secours hors-ligne)
+  const localGym  = await DB.all("gymnasts");
+  const localProg = await DB.all("programs");
+  const localFull = await DB.all("fullPrograms");
+  const kvS = await DB.get("kv","settings");
+  const kvF = await DB.get("kv","folders");
+  const localSettings = kvS ? kvS.value : null;
+  const localFolders  = kvF ? kvF.value : null;
+
+  // Tentative cloud
+  let cloud=null;
+  if(CLOUD_ENABLED){ try{ cloud = await Cloud.pullEverything(); Cloud.online=true; }catch(e){ Cloud.online=false; console.warn("Cloud indisponible -> mode local", e); } }
+
+  if(cloud){
+    const cloudEmpty = !cloud.gymnasts.length && !cloud.programs.length && !cloud.fullPrograms.length && !cloud.settings && !cloud.folders;
+    const localHasData = localGym.length || localProg.length || localFull.length || localSettings || localFolders;
+    if(cloudEmpty && localHasData){
+      // Premiere fois : on pousse le contenu local vers le cloud
+      S.gymnasts=localGym; S.programs=localProg; S.fullPrograms=localFull;
+      S.settings = localSettings || {...DEFAULT_SETTINGS};
+      S.folders  = normalizeFolders(localFolders);
+      try{ await pushAllToCloud(); }catch(e){ console.warn("migration cloud echouee", e); }
+    } else {
+      S.gymnasts=cloud.gymnasts; S.programs=cloud.programs; S.fullPrograms=cloud.fullPrograms;
+      S.settings = cloud.settings ? {...DEFAULT_SETTINGS, ...cloud.settings} : {...DEFAULT_SETTINGS};
+      S.folders  = normalizeFolders(cloud.folders);
+      await cacheToLocal();
+    }
+  } else {
+    S.gymnasts=localGym; S.programs=localProg; S.fullPrograms=localFull;
+    S.settings = localSettings || {...DEFAULT_SETTINGS};
+    S.folders  = normalizeFolders(localFolders);
   }
-  // garantir la presence des 4 agres par defaut
-  DEFAULT_FOLDERS.forEach(d=>{ if(!loadedFolders.some(f=>f.id===d.id)) loadedFolders.push({...d}); });
-  S.folders = loadedFolders;
-  const kvLogo = await DB.get('kv','logo');
-  if(kvLogo?.blob){ S.logo = URL.createObjectURL(kvLogo.blob); }
-  S.gymnasts = await DB.all('gymnasts');
-  S.programs = await DB.all('programs');
-  S.fullPrograms = await DB.all('fullPrograms');
-  S.media = await DB.all('media');
 }
-const saveSettings = () => DB.put('kv',{id:'settings',value:S.settings});
-const saveFolders  = () => DB.put('kv',{id:'folders',value:S.folders});
-const saveGym = g => DB.put('gymnasts',g);
-const saveProg = p => DB.put('programs',p);
-const saveFull = p => DB.put('fullPrograms',p);
+const saveSettings = async () => { await DB.put('kv',{id:'settings',value:S.settings}); cloudPushKV('settings',S.settings); };
+const saveFolders  = async () => { await DB.put('kv',{id:'folders',value:S.folders}); cloudPushKV('folders',S.folders); };
+const saveGym  = async (g) => { await DB.put('gymnasts',g); cloudPush('gymnasts',g); return g; };
+const saveProg = async (p) => { await DB.put('programs',p); cloudPush('programs',p); return p; };
+const saveFull = async (p) => { await DB.put('fullPrograms',p); cloudPush('fullPrograms',p); return p; };
 
 /* ============================================================
    Factories
@@ -399,6 +501,7 @@ function render(){
   const shell=el(`<div>
     <div class="topbar">
       <div class="brand">Coaching Dine<span>entraînement</span></div>
+      <span class="cloudb" style="font-size:11px;font-weight:700;color:#fff;padding:3px 9px;border-radius:999px;background:#6b7391;margin-left:8px"></span>
       <div class="role"></div>
     </div>
     <div class="wrap" id="wrap"></div>
@@ -407,6 +510,7 @@ function render(){
   const roleBadge=shell.querySelector('.role');
   roleBadge.style.cursor='pointer'; roleBadge.title='Quitter';
   roleBadge.onclick=()=>{ S.role=null; nav('home'); };
+  setCloudBadge(shell.querySelector('.cloudb'));
   const wrap=shell.querySelector('#wrap');
   const view = ROUTES[S.screen] ? ROUTES[S.screen]() : el('<div>Écran inconnu</div>');
   wrap.appendChild(view);
@@ -510,7 +614,7 @@ function gymsScreen(){
       </div>`);
       item.querySelector('[data-open]').onclick=()=>nav('gymProfile',{id:g.id});
       item.querySelector('[data-del]').onclick=()=>confirmModal('Supprimer',`Supprimer ${g.name} et ses données ?`,async()=>{
-        await DB.del('gymnasts',g.id); S.gymnasts=S.gymnasts.filter(x=>x.id!==g.id); toast('Supprimée'); nav('gyms');
+        await DB.del('gymnasts',g.id); cloudRemove('gymnasts',g.id); S.gymnasts=S.gymnasts.filter(x=>x.id!==g.id); toast('Supprimée'); nav('gyms');
       });
       list.appendChild(item);
     });
@@ -648,8 +752,8 @@ function tabComplets(g){
       const items=[{apparatus:'complet',programName:p.name,exercises:p.exercises.map(e=>cloneExercise(e))}];
       commitSession(g,items);
     };
-    it.querySelector('[data-del]').onclick=()=>confirmModal('Supprimer',`Supprimer le programme complet « ${p.name} » ? Il sera retiré pour toutes les gyms.`,async()=>{
-      await DB.del('fullPrograms',p.id); S.fullPrograms=S.fullPrograms.filter(x=>x.id!==p.id); nav('gymProfile',{id:g.id,tab:'complets'});
+    it.querySelector('[data-del]').onclick=()=>confirmModal('Supprimer',`Supprimer le programme complet « ${p.name} » ? Il sera retiré pour toutes les gyms.`,async()=>{
+      await DB.del('fullPrograms',p.id); cloudRemove('fullPrograms',p.id); S.fullPrograms=S.fullPrograms.filter(x=>x.id!==p.id); nav('gymProfile',{id:g.id,tab:'complets'});
     });
     n.appendChild(it);
   });
@@ -1003,7 +1107,7 @@ function buildAgres(){
       <button class="btn sm danger" data-del>Suppr.</button></div>`);
     it.querySelector('[data-edit]').onclick=()=>nav('build',{tab:'agres',app,prog:p.id});
     it.querySelector('[data-del]').onclick=()=>confirmModal('Supprimer',`Supprimer le programme « ${p.name} » ?`,async()=>{
-      await DB.del('programs',p.id); S.programs=S.programs.filter(x=>x.id!==p.id); nav('build',{tab:'agres',app});
+      await DB.del('programs',p.id); cloudRemove('programs',p.id); S.programs=S.programs.filter(x=>x.id!==p.id); nav('build',{tab:'agres',app});
     });
     n.appendChild(it);
   });
@@ -1089,7 +1193,7 @@ function buildComplet(){
       <button class="btn sm danger" data-del>Suppr.</button></div>`);
     it.querySelector('[data-edit]').onclick=()=>nav('build',{tab:'complet',prog:p.id});
     it.querySelector('[data-dup]').onclick=async()=>{ const c={...JSON.parse(JSON.stringify(p)),id:uid(),name:p.name+' (copie)'}; await saveFull(c); S.fullPrograms.push(c); nav('build',{tab:'complet'}); };
-    it.querySelector('[data-del]').onclick=()=>confirmModal('Supprimer',`Supprimer « ${p.name} » ?`,async()=>{ await DB.del('fullPrograms',p.id); S.fullPrograms=S.fullPrograms.filter(x=>x.id!==p.id); nav('build',{tab:'complet'}); });
+    it.querySelector('[data-del]').onclick=()=>confirmModal('Supprimer',`Supprimer « ${p.name} » ?`,async()=>{ await DB.del('fullPrograms',p.id); cloudRemove('fullPrograms',p.id); S.fullPrograms=S.fullPrograms.filter(x=>x.id!==p.id); nav('build',{tab:'complet'}); });
     n.appendChild(it);
   });
   return n;
@@ -1189,7 +1293,7 @@ function buildMedia(){
       if(m.type==='video') thb.appendChild(makeLoopVideo(url));
       else thb.appendChild(el(`<img src="${url}">`));
       th.querySelector('[data-rename]').onclick=()=>promptModal('Renommer le média','Nom',{value:m.name,okText:'Renommer',onOk:async(v)=>{ m.name=v.trim(); await DB.put('media',m); closeModal(); paint(); }});
-      th.querySelector('[data-del]').onclick=()=>confirmModal('Supprimer',`Supprimer « ${m.name} » ?`,async()=>{ await DB.del('media',m.id); S.media=S.media.filter(x=>x.id!==m.id); delete objURLs[m.id]; paint(); });
+      th.querySelector('[data-del]').onclick=()=>confirmModal('Supprimer',`Supprimer « ${m.name} » ?`,async()=>{ await DB.del('media',m.id); S.media=S.media.filter(x=>x.id!==m.id); delete objURLs[m.id]; paint(); });
       th.querySelector('[data-move]').onclick=()=>{
         const opts=allFoldersSorted();
         const b=el(`<div><label class="fld">Déplacer vers</label>
@@ -1224,7 +1328,7 @@ function folderGrid(parentId){
     </button>`);
     t.onclick=(e)=>{ if(e.target.closest('[data-delf]')) return; nav('build',{tab:'media',folder:f.id}); };
     const df=t.querySelector('[data-delf]');
-    if(df) df.onclick=(e)=>{ e.stopPropagation(); confirmModal('Supprimer le dossier',`Supprimer « ${f.name} », ses sous-dossiers et tous leurs médias ?`,async()=>{
+    if(df) df.onclick=(e)=>{ e.stopPropagation(); confirmModal('Supprimer le dossier',`Supprimer « ${f.name} », ses sous-dossiers et tous leurs médias ?`,async()=>{
       const ids=[f.id,...folderDescendantIds(f.id)];
       for(const m of S.media.filter(x=>ids.includes(x.folder))){ await DB.del('media',m.id); delete objURLs[m.id]; }
       S.media=S.media.filter(x=>!ids.includes(x.folder));
@@ -1242,6 +1346,20 @@ function folderGrid(parentId){
 function adminScreen(){
   const n=el('<div></div>');
   n.appendChild(header('Administrateur',null,[{label:'Accueil',to:()=>{S.role=null;nav('home');}},{label:'Admin'}]));
+
+  // Cloud / synchronisation
+  const cloudCard=el(`<div class="card">
+    <h2 style="margin-top:2px">Cloud (synchronisation)</h2>
+    <p class="muted" style="margin-top:0">Etat : <b class="cloudstate"></b>. Les donnees (gyms, programmes, reglages) sont partagees entre tous les appareils. Les videos restent locales pour l'instant (etape suivante : R2).</p>
+    <div class="flex" style="flex-wrap:wrap;gap:8px">
+      <button class="btn sm" data-push>\u2b06 Envoyer mes donnees vers le cloud</button>
+      <button class="btn sm ghost" data-pull>\u2b07 Recharger depuis le cloud</button>
+    </div></div>`);
+  const setCState=()=>{ const b=cloudCard.querySelector('.cloudstate'); if(!CLOUD_ENABLED){b.textContent="desactive (hors-ligne)";b.style.color="#6b7391";} else if(Cloud.online){b.textContent="connecte";b.style.color="#2e9e5b";} else {b.textContent="non connecte";b.style.color="#c8302f";} };
+  setCState();
+  cloudCard.querySelector('[data-push]').onclick=async()=>{ if(!CLOUD_ENABLED){toast("Cloud indisponible");return;} toast("Envoi en cours..."); try{ await pushAllToCloud(); setCState(); toast("Donnees envoyees au cloud"); }catch(e){ console.warn(e); toast("Echec de l envoi"); } };
+  cloudCard.querySelector('[data-pull]').onclick=async()=>{ if(!CLOUD_ENABLED){toast("Cloud indisponible");return;} toast("Chargement..."); try{ const c=await Cloud.pullEverything(); Cloud.online=true; S.gymnasts=c.gymnasts; S.programs=c.programs; S.fullPrograms=c.fullPrograms; if(c.settings)S.settings={...DEFAULT_SETTINGS,...c.settings}; S.folders=normalizeFolders(c.folders); await cacheToLocal(); paintCloudBadge(); nav("admin"); toast("Recharge depuis le cloud"); }catch(e){ console.warn(e); Cloud.online=false; paintCloudBadge(); toast("Echec du chargement"); } };
+  n.appendChild(cloudCard);
 
   // Passwords
   const pw=el(`<div class="card">
@@ -1278,7 +1396,7 @@ function adminScreen(){
       <button class="btn sm ghost" data-reset>Réinit. séance</button>
       <button class="btn sm danger" data-del>Suppr.</button></div>`);
     it.querySelector('[data-reset]').onclick=()=>confirmModal('Réinitialiser',`Effacer la séance en cours de ${g.name} ?`,async()=>{ g.session=null; await saveGym(g); nav('admin'); },{yesText:'Effacer',danger:false});
-    it.querySelector('[data-del]').onclick=()=>confirmModal('Supprimer',`Supprimer ${g.name} ?`,async()=>{ await DB.del('gymnasts',g.id); S.gymnasts=S.gymnasts.filter(x=>x.id!==g.id); nav('admin'); });
+    it.querySelector('[data-del]').onclick=()=>confirmModal('Supprimer',`Supprimer ${g.name} ?`,async()=>{ await DB.del('gymnasts',g.id); cloudRemove('gymnasts',g.id); S.gymnasts=S.gymnasts.filter(x=>x.id!==g.id); nav('admin'); });
     gy.appendChild(it);
   });
   n.appendChild(gy);
