@@ -241,7 +241,8 @@ const DB = (() => {
    ============================================================ */
 const SUPA_URL = 'https://kehvxapkbrkzaavrvdpt.supabase.co';
 const SUPA_KEY = 'sb_publishable_ACMnhG_N7a2P99IsjS523w_J7tMyHJx';
-const CLOUD_MAP = { gymnasts:'coaching_gymnasts', programs:'coaching_programs', fullPrograms:'coaching_full_programs' };
+const CLOUD_MAP = { gymnasts:'coaching_gymnasts', programs:'coaching_programs', fullPrograms:'coaching_full_programs', media:'coaching_media' };
+const SUPA_BUCKET = 'coaching-media';
 let sb=null, CLOUD_ENABLED=false;
 try{
   if(window.supabase && window.supabase.createClient){
@@ -254,18 +255,20 @@ const Cloud = {
   online:false,
   async pullEverything(){
     if(!sb) throw new Error("no client");
-    const [g,p,fp,kv] = await Promise.all([
+    const [g,p,fp,kv,md] = await Promise.all([
       sb.from("coaching_gymnasts").select("data"),
       sb.from("coaching_programs").select("data"),
       sb.from("coaching_full_programs").select("data"),
       sb.from("coaching_kv").select("id,data"),
+      sb.from("coaching_media").select("data"),
     ]);
-    for(const r of [g,p,fp,kv]){ if(r.error) throw r.error; }
+    for(const r of [g,p,fp,kv,md]){ if(r.error) throw r.error; }
     const kvMap={}; (kv.data||[]).forEach(r=>{ kvMap[r.id]=r.data; });
     return {
       gymnasts:(g.data||[]).map(r=>r.data),
       programs:(p.data||[]).map(r=>r.data),
       fullPrograms:(fp.data||[]).map(r=>r.data),
+      media:(md.data||[]).map(r=>r.data),
       settings:kvMap["settings"]||null,
       folders:kvMap["folders"]||null,
     };
@@ -273,6 +276,10 @@ const Cloud = {
   async upsert(store,obj){ if(!sb) return; const t=CLOUD_MAP[store]; const {error}=await sb.from(t).upsert({id:obj.id,data:obj,updated_at:new Date().toISOString()}); if(error) throw error; },
   async upsertKV(key,val){ if(!sb) return; const {error}=await sb.from("coaching_kv").upsert({id:key,data:val,updated_at:new Date().toISOString()}); if(error) throw error; },
   async remove(store,id){ if(!sb) return; const t=CLOUD_MAP[store]; const {error}=await sb.from(t).delete().eq("id",id); if(error) throw error; },
+  async upsertMedia(m){ if(!sb) return; const {error}=await sb.from("coaching_media").upsert({id:m.id,data:mediaMeta(m),updated_at:new Date().toISOString()}); if(error) throw error; },
+  async removeMediaRow(id){ if(!sb) return; const {error}=await sb.from("coaching_media").delete().eq("id",id); if(error) throw error; },
+  async uploadFile(path,file){ if(!sb) throw new Error("no client"); const {error}=await sb.storage.from(SUPA_BUCKET).upload(path,file,{contentType:file.type||"application/octet-stream",upsert:true}); if(error) throw error; return sb.storage.from(SUPA_BUCKET).getPublicUrl(path).data.publicUrl; },
+  async removeFile(path){ if(!sb || !path) return; try{ await sb.storage.from(SUPA_BUCKET).remove([path]); }catch(e){ console.warn("removeFile", e); } },
 };
 
 let _cloudBadge=null;
@@ -288,6 +295,9 @@ function cloudFail(e){ console.warn("cloud:", e); if(Cloud.online){ Cloud.online
 function cloudPush(store,obj){ if(!CLOUD_ENABLED) return; Cloud.upsert(store,obj).then(cloudOK).catch(cloudFail); }
 function cloudPushKV(key,val){ if(!CLOUD_ENABLED) return; Cloud.upsertKV(key,val).then(cloudOK).catch(cloudFail); }
 function cloudRemove(store,id){ if(!CLOUD_ENABLED) return; Cloud.remove(store,id).then(cloudOK).catch(cloudFail); }
+function mediaMeta(m){ return {id:m.id, folder:m.folder, type:m.type, name:m.name, url:m.url||null, path:m.path||null, createdAt:m.createdAt||Date.now()}; }
+function cloudPushMedia(m){ if(!CLOUD_ENABLED) return; Cloud.upsertMedia(m).then(cloudOK).catch(cloudFail); }
+function cloudRemoveMedia(id,path){ if(!CLOUD_ENABLED) return; Cloud.removeFile(path); Cloud.removeMediaRow(id).then(cloudOK).catch(cloudFail); }
 
 async function pushAllToCloud(){
   const jobs=[];
@@ -296,6 +306,7 @@ async function pushAllToCloud(){
   S.fullPrograms.forEach(p=>jobs.push(Cloud.upsert("fullPrograms",p)));
   jobs.push(Cloud.upsertKV("settings",S.settings));
   jobs.push(Cloud.upsertKV("folders",S.folders));
+  S.media.filter(m=>m.url).forEach(m=>jobs.push(Cloud.upsertMedia(m)));
   await Promise.all(jobs);
   Cloud.online=true; paintCloudBadge();
 }
@@ -331,9 +342,11 @@ const S = {
 const objURLs = {};          // mediaId -> objectURL cache
 function mediaURL(id){
   if(!id) return null;
-  if(objURLs[id]) return objURLs[id];
   const m = S.media.find(x=>x.id===id);
-  if(!m||!m.blob) return null;
+  if(!m) return null;
+  if(m.url) return m.url;
+  if(objURLs[id]) return objURLs[id];
+  if(!m.blob) return null;
   const u=URL.createObjectURL(m.blob); objURLs[id]=u; return u;
 }
 
@@ -356,7 +369,7 @@ async function loadAll(){
   // Logo + medias : toujours en local (les videos iront sur R2 a l'etape suivante)
   const kvLogo = await DB.get("kv","logo");
   if(kvLogo && kvLogo.blob){ S.logo = URL.createObjectURL(kvLogo.blob); }
-  S.media = await DB.all("media");
+  const localMedia = await DB.all("media");
 
   // Donnees locales (cache / secours hors-ligne)
   const localGym  = await DB.all("gymnasts");
@@ -390,6 +403,18 @@ async function loadAll(){
     S.gymnasts=localGym; S.programs=localProg; S.fullPrograms=localFull;
     S.settings = localSettings || {...DEFAULT_SETTINGS};
     S.folders  = normalizeFolders(localFolders);
+  }
+
+  // --- Medias : metadata cloud (URL) + blobs locaux pas encore envoyes ---
+  if(cloud){
+    const localBlobs={}; localMedia.forEach(m=>{ if(m.blob) localBlobs[m.id]=m.blob; });
+    const cloudMedia=(cloud.media||[]).map(m=> localBlobs[m.id] ? {...m, blob:localBlobs[m.id]} : m);
+    const cloudIds=new Set(cloudMedia.map(m=>m.id));
+    const localOnly=localMedia.filter(m=>!cloudIds.has(m.id));
+    S.media=cloudMedia.concat(localOnly);
+    try{ for(const m of S.media){ await DB.put("media", m); } }catch(e){ console.warn("cache media", e); }
+  } else {
+    S.media=localMedia;
   }
 }
 const saveSettings = async () => { await DB.put('kv',{id:'settings',value:S.settings}); cloudPushKV('settings',S.settings); };
@@ -1258,12 +1283,22 @@ function buildMedia(){
     <label class="btn sm ghost" style="margin-top:8px;display:inline-flex">Choisir des fichiers<input type="file" accept="video/*,image/*" multiple hidden></label></div>`);
   const fileInput=dz.querySelector('input');
   const handleFiles=async(files)=>{
+    if(!CLOUD_ENABLED || !Cloud.online){ toast("Connexion au cloud requise pour ajouter des médias"); return; }
+    let okCount=0;
+    toast("Envoi de "+files.length+" fichier(s)…");
     for(const f of files){
       const type=f.type.startsWith('video')?'video':'image';
-      const m={id:uid(),folder:folderId,type,name:f.name.replace(/\.[^.]+$/,''),blob:f,createdAt:Date.now()};
-      await DB.put('media',m); S.media.push(m);
+      const id=uid();
+      const extMatch=f.name.match(/\.[^.]+$/); const ext=extMatch?extMatch[0]:(type==='video'?'.mp4':'.jpg');
+      const path=id+ext;
+      try{
+        const url=await Cloud.uploadFile(path,f);
+        const m={id,folder:folderId,type,name:f.name.replace(/\.[^.]+$/,''),url,path,createdAt:Date.now()};
+        await DB.put('media',m); S.media.push(m); await Cloud.upsertMedia(m); okCount++;
+      }catch(e){ console.warn("upload echoue", e); }
     }
-    toast(files.length+' fichier(s) ajouté(s)'); nav('build',{tab:'media',folder:folderId});
+    if(okCount) toast(okCount+" fichier(s) envoyé(s)"); else toast("Échec de l'envoi");
+    nav('build',{tab:'media',folder:folderId});
   };
   fileInput.onchange=()=>handleFiles([...fileInput.files]);
   dz.addEventListener('dragover',e=>{e.preventDefault();dz.classList.add('hot');});
@@ -1292,8 +1327,8 @@ function buildMedia(){
       const thb=th.querySelector('.th'); const url=mediaURL(m.id);
       if(m.type==='video') thb.appendChild(makeLoopVideo(url));
       else thb.appendChild(el(`<img src="${url}">`));
-      th.querySelector('[data-rename]').onclick=()=>promptModal('Renommer le média','Nom',{value:m.name,okText:'Renommer',onOk:async(v)=>{ m.name=v.trim(); await DB.put('media',m); closeModal(); paint(); }});
-      th.querySelector('[data-del]').onclick=()=>confirmModal('Supprimer',`Supprimer « ${m.name} » ?`,async()=>{ await DB.del('media',m.id); S.media=S.media.filter(x=>x.id!==m.id); delete objURLs[m.id]; paint(); });
+      th.querySelector('[data-rename]').onclick=()=>promptModal('Renommer le média','Nom',{value:m.name,okText:'Renommer',onOk:async(v)=>{ m.name=v.trim(); await DB.put('media',m); cloudPushMedia(m); closeModal(); paint(); }});
+      th.querySelector('[data-del]').onclick=()=>confirmModal('Supprimer',`Supprimer « ${m.name} » ?`,async()=>{ await DB.del('media',m.id); cloudRemoveMedia(m.id,m.path); S.media=S.media.filter(x=>x.id!==m.id); delete objURLs[m.id]; paint(); });
       th.querySelector('[data-move]').onclick=()=>{
         const opts=allFoldersSorted();
         const b=el(`<div><label class="fld">Déplacer vers</label>
@@ -1301,7 +1336,7 @@ function buildMedia(){
           <div class="spacer"></div><div class="btnrow" style="justify-content:flex-end">
           <button class="btn ghost" data-x>Annuler</button><button class="btn" data-ok>Déplacer</button></div></div>`);
         b.querySelector('[data-x]').onclick=closeModal;
-        b.querySelector('[data-ok]').onclick=async()=>{ m.folder=b.querySelector('select').value; await DB.put('media',m); closeModal(); nav('build',{tab:'media',folder:folderId}); };
+        b.querySelector('[data-ok]').onclick=async()=>{ m.folder=b.querySelector('select').value; await DB.put('media',m); cloudPushMedia(m); closeModal(); nav('build',{tab:'media',folder:folderId}); };
         modal('Déplacer le média',b);
       };
       grid.appendChild(th);
@@ -1330,7 +1365,7 @@ function folderGrid(parentId){
     const df=t.querySelector('[data-delf]');
     if(df) df.onclick=(e)=>{ e.stopPropagation(); confirmModal('Supprimer le dossier',`Supprimer « ${f.name} », ses sous-dossiers et tous leurs médias ?`,async()=>{
       const ids=[f.id,...folderDescendantIds(f.id)];
-      for(const m of S.media.filter(x=>ids.includes(x.folder))){ await DB.del('media',m.id); delete objURLs[m.id]; }
+      for(const m of S.media.filter(x=>ids.includes(x.folder))){ await DB.del('media',m.id); cloudRemoveMedia(m.id,m.path); delete objURLs[m.id]; }
       S.media=S.media.filter(x=>!ids.includes(x.folder));
       S.folders=S.folders.filter(x=>!ids.includes(x.id));
       await saveFolders(); nav('build', parentId?{tab:'media',folder:parentId}:{tab:'media'});
@@ -1358,8 +1393,39 @@ function adminScreen(){
   const setCState=()=>{ const b=cloudCard.querySelector('.cloudstate'); if(!CLOUD_ENABLED){b.textContent="desactive (hors-ligne)";b.style.color="#6b7391";} else if(Cloud.online){b.textContent="connecte";b.style.color="#2e9e5b";} else {b.textContent="non connecte";b.style.color="#c8302f";} };
   setCState();
   cloudCard.querySelector('[data-push]').onclick=async()=>{ if(!CLOUD_ENABLED){toast("Cloud indisponible");return;} toast("Envoi en cours..."); try{ await pushAllToCloud(); setCState(); toast("Donnees envoyees au cloud"); }catch(e){ console.warn(e); toast("Echec de l envoi"); } };
-  cloudCard.querySelector('[data-pull]').onclick=async()=>{ if(!CLOUD_ENABLED){toast("Cloud indisponible");return;} toast("Chargement..."); try{ const c=await Cloud.pullEverything(); Cloud.online=true; S.gymnasts=c.gymnasts; S.programs=c.programs; S.fullPrograms=c.fullPrograms; if(c.settings)S.settings={...DEFAULT_SETTINGS,...c.settings}; S.folders=normalizeFolders(c.folders); await cacheToLocal(); paintCloudBadge(); nav("admin"); toast("Recharge depuis le cloud"); }catch(e){ console.warn(e); Cloud.online=false; paintCloudBadge(); toast("Echec du chargement"); } };
+  cloudCard.querySelector('[data-pull]').onclick=async()=>{ if(!CLOUD_ENABLED){toast("Cloud indisponible");return;} toast("Chargement..."); try{ const c=await Cloud.pullEverything(); Cloud.online=true; S.gymnasts=c.gymnasts; S.programs=c.programs; S.fullPrograms=c.fullPrograms; if(c.settings)S.settings={...DEFAULT_SETTINGS,...c.settings}; S.folders=normalizeFolders(c.folders); S.media=c.media||[]; await cacheToLocal(); paintCloudBadge(); nav("admin"); toast("Recharge depuis le cloud"); }catch(e){ console.warn(e); Cloud.online=false; paintCloudBadge(); toast("Echec du chargement"); } };
   n.appendChild(cloudCard);
+  // Envoi des medias locaux vers le cloud (Storage)
+  const localMed = S.media.filter(m=>m.blob && !m.url);
+  const mig=el(`<div class="card">
+    <h2 style="margin-top:2px">Vidéos & images — envoi vers le cloud</h2>
+    <p class="muted" style="margin-top:0">${localMed.length? localMed.length+" média(s) encore en local. Envoie-les pour qu'ils soient visibles sur tous les appareils (téléphone, autres coachs)." : "Tous tes médias sont en ligne."}</p>
+    <div class="flex" style="flex-wrap:wrap;gap:8px">
+      <button class="btn sm" data-mig ${localMed.length?"":"disabled"}>\u2b06 Envoyer les médias (${localMed.length})</button>
+      <span class="muted migprog" style="align-self:center"></span>
+    </div></div>`);
+  const mb=mig.querySelector('[data-mig]');
+  if(mb) mb.onclick=async()=>{
+    if(!CLOUD_ENABLED || !Cloud.online){ toast("Connexion au cloud requise"); return; }
+    const list=S.media.filter(m=>m.blob && !m.url);
+    const prog=mig.querySelector('.migprog'); let done=0, fail=0;
+    mb.disabled=true;
+    for(const m of list){
+      prog.textContent=(done+1)+"/"+list.length+"…";
+      try{
+        const ext=(m.type==='video')?'.mp4':'.jpg';
+        const path=m.id+ext;
+        const url=await Cloud.uploadFile(path,m.blob);
+        m.url=url; m.path=path; delete m.blob;
+        await DB.put('media',m); await Cloud.upsertMedia(m); done++;
+      }catch(e){ console.warn("migration media", e); fail++; }
+    }
+    Cloud.online=true; paintCloudBadge();
+    toast(done+" envoyé(s)"+(fail?(" — "+fail+" échec(s)"):""));
+    nav('admin');
+  };
+  n.appendChild(mig);
+
 
   // Passwords
   const pw=el(`<div class="card">
