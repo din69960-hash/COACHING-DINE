@@ -1395,36 +1395,6 @@ function adminScreen(){
   cloudCard.querySelector('[data-push]').onclick=async()=>{ if(!CLOUD_ENABLED){toast("Cloud indisponible");return;} toast("Envoi en cours..."); try{ await pushAllToCloud(); setCState(); toast("Donnees envoyees au cloud"); }catch(e){ console.warn(e); toast("Echec de l envoi"); } };
   cloudCard.querySelector('[data-pull]').onclick=async()=>{ if(!CLOUD_ENABLED){toast("Cloud indisponible");return;} toast("Chargement..."); try{ const c=await Cloud.pullEverything(); Cloud.online=true; S.gymnasts=c.gymnasts; S.programs=c.programs; S.fullPrograms=c.fullPrograms; if(c.settings)S.settings={...DEFAULT_SETTINGS,...c.settings}; S.folders=normalizeFolders(c.folders); S.media=c.media||[]; await cacheToLocal(); paintCloudBadge(); nav("admin"); toast("Recharge depuis le cloud"); }catch(e){ console.warn(e); Cloud.online=false; paintCloudBadge(); toast("Echec du chargement"); } };
   n.appendChild(cloudCard);
-  // Envoi des medias locaux vers le cloud (Storage)
-  const localMed = S.media.filter(m=>m.blob && !m.url);
-  const mig=el(`<div class="card">
-    <h2 style="margin-top:2px">Vidéos & images — envoi vers le cloud</h2>
-    <p class="muted" style="margin-top:0">${localMed.length? localMed.length+" média(s) encore en local. Envoie-les pour qu'ils soient visibles sur tous les appareils (téléphone, autres coachs)." : "Tous tes médias sont en ligne."}</p>
-    <div class="flex" style="flex-wrap:wrap;gap:8px">
-      <button class="btn sm" data-mig ${localMed.length?"":"disabled"}>\u2b06 Envoyer les médias (${localMed.length})</button>
-      <span class="muted migprog" style="align-self:center"></span>
-    </div></div>`);
-  const mb=mig.querySelector('[data-mig]');
-  if(mb) mb.onclick=async()=>{
-    if(!CLOUD_ENABLED || !Cloud.online){ toast("Connexion au cloud requise"); return; }
-    const list=S.media.filter(m=>m.blob && !m.url);
-    const prog=mig.querySelector('.migprog'); let done=0, fail=0;
-    mb.disabled=true;
-    for(const m of list){
-      prog.textContent=(done+1)+"/"+list.length+"…";
-      try{
-        const ext=(m.type==='video')?'.mp4':'.jpg';
-        const path=m.id+ext;
-        const url=await Cloud.uploadFile(path,m.blob);
-        m.url=url; m.path=path; delete m.blob;
-        await DB.put('media',m); await Cloud.upsertMedia(m); done++;
-      }catch(e){ console.warn("migration media", e); fail++; }
-    }
-    Cloud.online=true; paintCloudBadge();
-    toast(done+" envoyé(s)"+(fail?(" — "+fail+" échec(s)"):""));
-    nav('admin');
-  };
-  n.appendChild(mig);
 
 
   // Passwords
