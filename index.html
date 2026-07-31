@@ -757,9 +757,11 @@ function gymsScreen(){
   if(!S.gymnasts.length){ list.appendChild(el('<div class="empty">Aucune gymnaste pour l’instant.<br>Ajoute un premier prénom pour commencer.</div>')); }
   else{
     S.gymnasts.slice().sort((a,b)=>a.name.localeCompare(b.name)).forEach(g=>{
+      ensureSessions(g);
+      const nb=g.sessions.length;
       const item=el(`<div class="list-item">
         <div class="name">${esc(g.name)}</div>
-        <div class="meta">${g.session?'Séance en cours':(g.history?.length?g.history.length+' séance(s)':'—')}</div>
+        <div class="meta">${nb?nb+' séance(s)':'—'}</div>
         <button class="btn sm" data-open>Ouvrir</button>
         <button class="btn sm danger" data-del>Suppr.</button>
       </div>`);
@@ -807,19 +809,48 @@ function gymProfile(){
 
 /* -- Poursuivre : dernière séance saisie -- */
 function tabPoursuivre(g){
+  ensureSessions(g);
   const n=el('<div></div>');
-  const hasHist = g.history && g.history.length;
-  if(!g.session && !hasHist){
-    n.appendChild(el('<div class="empty">Aucune séance en cours.<br>Va sur « Nouveaux programmes » ou « Programmes complets » pour en démarrer une.</div>'));
+
+  // --- Vue d'une séance précise ---
+  if(S.params.sess){
+    const sess=g.sessions.find(s=>s.id===S.params.sess);
+    if(sess){
+      const back=el('<button class="btn line" style="margin-bottom:10px">‹ Toutes les séances</button>');
+      back.onclick=()=>nav('gymProfile',{id:g.id,tab:'poursuivre'});
+      n.appendChild(back);
+      const dateStr=new Date(sess.startedAt).toLocaleDateString('fr-FR',{weekday:'long',day:'numeric',month:'long'});
+      n.appendChild(el(`<p class="muted" style="margin-top:2px">${sess.archived
+          ? 'Séance archivée du '+dateStr+' — tes résultats sont conservés.'
+          : 'Séance du '+dateStr+'. Les données saisies sont conservées.'}</p>`));
+      n.appendChild(renderSession(g, sess));
+      return n;
+    }
+  }
+
+  // --- Liste des séances ---
+  if(!g.sessions.length){
+    n.appendChild(el('<div class="empty">Aucune séance pour l’instant.<br>L’entraîneur peut t’en envoyer, ou démarres-en une dans « Nouveaux programmes » / « Programmes complets ».</div>'));
     return n;
   }
-  const sess = g.session || g.history[g.history.length-1];
-  const archived = !g.session;
-  const dateStr = new Date(sess.startedAt).toLocaleDateString('fr-FR',{weekday:'long',day:'numeric',month:'long'});
-  n.appendChild(el(`<p class="muted" style="margin-top:-4px">${archived
-      ? 'Dernière séance (archivée) du '+dateStr+'. Tes résultats sont conservés — tu peux les revoir et la reprendre.'
-      : 'Séance démarrée le '+dateStr+'. Les données saisies sont conservées.'}</p>`));
-  n.appendChild(renderSession(g, sess, archived));
+  n.appendChild(el('<p class="muted" style="margin-top:-4px">Choisis une séance à suivre.</p>'));
+  const sorted=g.sessions.slice().sort((a,b)=>(a.archived-b.archived) || (b.startedAt-a.startedAt));
+  sorted.forEach(sess=>{
+    const names=sess.items.map(it=>it.programName).join(', ')||'Séance';
+    const nbExo=sess.items.reduce((s,it)=>s+it.exercises.length,0);
+    const dateStr=new Date(sess.startedAt).toLocaleDateString('fr-FR',{day:'numeric',month:'short'});
+    const it=el(`<div class="list-item">
+      <div class="grow"><div class="name">${esc(names)}</div>
+        <div class="meta">${nbExo} exo · ${dateStr}${sess.archived?' · archivée':''}</div></div>
+      <button class="btn sm" data-open>Ouvrir</button>
+      <button class="btn sm danger" data-del>Suppr.</button>
+    </div>`);
+    it.querySelector('[data-open]').onclick=()=>nav('gymProfile',{id:g.id,tab:'poursuivre',sess:sess.id});
+    it.querySelector('[data-del]').onclick=()=>confirmModal('Supprimer','Supprimer cette séance et ses résultats ?',async()=>{
+      g.sessions=g.sessions.filter(s=>s.id!==sess.id); await saveGym(g); nav('gymProfile',{id:g.id,tab:'poursuivre'});
+    });
+    n.appendChild(it);
+  });
   return n;
 }
 
@@ -917,7 +948,18 @@ function tabComplets(g){
   return n;
 }
 
-/* ---------- Start / commit a session ---------- */
+/* ---------- Sessions (plusieurs séances par gym) ---------- */
+/* Migration : convertit l'ancien modèle (g.session + g.history) en g.sessions[] */
+function ensureSessions(g){
+  if(!Array.isArray(g.sessions)){
+    g.sessions=[];
+    if(g.session){ g.sessions.push({id:uid(), archived:false, startedAt:g.session.startedAt||Date.now(), items:g.session.items||[]}); }
+    if(Array.isArray(g.history)){ g.history.forEach(h=>g.sessions.push({id:uid(), archived:true, startedAt:h.startedAt||Date.now(), endedAt:h.endedAt||Date.now(), items:h.items||[]})); }
+    delete g.session; delete g.history;
+    saveGym(g);
+  }
+  return g.sessions;
+}
 function startSession(g,draft){
   const items=[];
   APPARATUS.forEach(a=>{
@@ -929,19 +971,61 @@ function startSession(g,draft){
   commitSession(g,items);
 }
 async function commitSession(g,items){
-  if(g.session){ g.history=g.history||[]; g.history.push({...g.session, endedAt:Date.now()}); }
-  g.session={startedAt:Date.now(), items};
+  ensureSessions(g);
+  const sess={id:uid(), archived:false, startedAt:Date.now(), items};
+  g.sessions.push(sess);
   g._draft={};
   await saveGym(g);
-  nav('gymProfile',{id:g.id,tab:'poursuivre'});
-  toast('Séance démarrée');
+  nav('gymProfile',{id:g.id,tab:'poursuivre',sess:sess.id});
+  toast('Séance ajoutée');
+}
+/* Envoyer un programme à une ou plusieurs gyms (apparait dans "Poursuivre le programme") */
+function sendProgramModal(progName, buildItem){
+  const gyms=S.gymnasts.slice().sort((a,b)=>a.name.localeCompare(b.name));
+  const selected=new Set();
+  const body=el('<div></div>');
+  if(!gyms.length){
+    body.appendChild(el('<div class="empty">Aucune gymnaste créée.<br>Ajoute-en dans « Choisir votre gym ».</div>'));
+  } else {
+    body.appendChild(el(`<p class="muted" style="margin-top:0">Sélectionne les gyms qui recevront « ${esc(progName)} » dans « Poursuivre le programme ».</p>`));
+    gyms.forEach(g=>{
+      const it=el(`<div class="list-item selectable">
+        <div class="name grow">${esc(g.name)}</div>
+        <div class="check" style="width:26px;height:26px;border-radius:50%;border:2px solid var(--line);display:flex;align-items:center;justify-content:center;font-weight:900;color:#fff"></div>
+      </div>`);
+      const paint=()=>{ const on=selected.has(g.id); it.classList.toggle('sel',on); const c=it.querySelector('.check'); c.style.background=on?'var(--ok)':'#fff'; c.style.borderColor=on?'var(--ok)':'var(--line)'; c.textContent=on?'✓':''; };
+      it.onclick=()=>{ selected.has(g.id)?selected.delete(g.id):selected.add(g.id); paint(); };
+      paint(); body.appendChild(it);
+    });
+  }
+  const foot=el(`<div class="btnrow" style="justify-content:flex-end;margin-top:12px">
+    <button class="btn ghost" data-x>Annuler</button>
+    <button class="btn" data-ok>Envoyer</button></div>`);
+  foot.querySelector('[data-x]').onclick=closeModal;
+  foot.querySelector('[data-ok]').onclick=async()=>{
+    if(!selected.size){ toast('Sélectionne au moins une gym'); return; }
+    let added=0, already=0;
+    for(const gid of selected){
+      const g=S.gymnasts.find(x=>x.id===gid); if(!g) continue;
+      ensureSessions(g);
+      const item=buildItem();
+      const has=g.sessions.some(s=>!s.archived && s.items.some(it=>it.programName===item.programName && it.apparatus===item.apparatus));
+      if(has){ already++; continue; }
+      g.sessions.push({id:uid(), archived:false, startedAt:Date.now(), items:[item]});
+      await saveGym(g); added++;
+    }
+    closeModal();
+    toast('Envoyé à '+added+' gym(s)'+(already?' — '+already+' déjà':''));
+  };
+  body.appendChild(foot);
+  modal('Envoyer à…', body);
 }
 
 /* ============================================================
    SESSION VIEW (gymnaste saisit ses réalisations)
    ============================================================ */
-function renderSession(g, sess, archived){
-  sess = sess || g.session;
+function renderSession(g, sess){
+  sess = sess || (g.sessions && g.sessions[0]);
   const n=el('<div></div>');
   let backfilled=false;
   // Retrouve l'exercice d'origine (pour récupérer un objectif ajouté après le démarrage)
@@ -978,31 +1062,28 @@ function renderSession(g, sess, archived){
       arrayMove(item.exercises,from,to);
       renumberDefaultTitles(item.exercises);
       saveGym(g);
-      nav('gymProfile',{id:g.id,tab:'poursuivre'});
+      nav('gymProfile',{id:g.id,tab:'poursuivre',sess:sess.id});
     });
   });
   if(backfilled) saveGym(g);
-  if(!archived){
+  if(!sess.archived){
     // Séance active : on peut la terminer / archiver
     const bar=el(`<div class="selbar"><div class="rowbtns">
       <button class="btn line grow" data-finish>Terminer & archiver la séance</button>
     </div></div>`);
-    bar.querySelector('[data-finish]').onclick=()=>confirmModal('Terminer','Archiver cette séance ? Elle restera consultable dans « Poursuivre le programme ».',async()=>{
-      g.history=g.history||[]; g.history.push({...g.session,endedAt:Date.now()}); g.session=null;
+    bar.querySelector('[data-finish]').onclick=()=>confirmModal('Terminer','Archiver cette séance ? Elle restera consultable dans la liste des séances.',async()=>{
+      sess.archived=true; sess.endedAt=Date.now();
       await saveGym(g); toast('Séance archivée'); nav('gymProfile',{id:g.id,tab:'poursuivre'});
     },{yesText:'Archiver',danger:false});
     n.appendChild(bar);
   } else {
-    // Séance archivée : on peut la reprendre pour repartir sur une nouvelle séance active
+    // Séance archivée : on peut la reprendre
     const bar=el(`<div class="selbar"><div class="rowbtns">
       <button class="btn g grow" data-resume>Reprendre cette séance</button>
     </div></div>`);
-    bar.querySelector('[data-resume]').onclick=()=>confirmModal('Reprendre','Reprendre cette séance ? Elle redeviendra ta séance en cours.',async()=>{
-      const idx=g.history.indexOf(sess);
-      if(idx>=0) g.history.splice(idx,1);
-      delete sess.endedAt;
-      g.session=sess;
-      await saveGym(g); toast('Séance reprise'); nav('gymProfile',{id:g.id,tab:'poursuivre'});
+    bar.querySelector('[data-resume]').onclick=()=>confirmModal('Reprendre','Reprendre cette séance ? Elle redeviendra active.',async()=>{
+      sess.archived=false; delete sess.endedAt;
+      await saveGym(g); toast('Séance reprise'); nav('gymProfile',{id:g.id,tab:'poursuivre',sess:sess.id});
     },{yesText:'Reprendre',danger:false});
     n.appendChild(bar);
   }
@@ -1377,9 +1458,11 @@ function buildAgres(){
   if(!progs.length) n.appendChild(el('<div class="empty">Aucun programme. Ajoute-en un.</div>'));
   progs.forEach(p=>{
     const it=el(`<div class="list-item">
-      <div class="name">${esc(p.name)}</div><div class="meta">${p.exercises.length} exo</div>
+      <div class="name grow">${esc(p.name)}</div><div class="meta">${p.exercises.length} exo</div>
+      <button class="btn sm ghost" data-send>Envoyer à</button>
       <button class="btn sm" data-edit>Modifier</button>
       <button class="btn sm danger" data-del>Suppr.</button></div>`);
+    it.querySelector('[data-send]').onclick=()=>sendProgramModal(p.name, ()=>({apparatus:p.apparatus, programName:p.name, exercises:p.exercises.map(e=>cloneExercise(e))}));
     it.querySelector('[data-edit]').onclick=()=>nav('build',{tab:'agres',app,prog:p.id});
     it.querySelector('[data-del]').onclick=()=>confirmModal('Supprimer',`Supprimer le programme « ${p.name} » ?`,async()=>{
       await DB.del('programs',p.id); cloudRemove('programs',p.id); S.programs=S.programs.filter(x=>x.id!==p.id); nav('build',{tab:'agres',app});
@@ -1492,10 +1575,12 @@ function buildComplet(){
   n.appendChild(bar);
   if(!S.fullPrograms.length) n.appendChild(el('<div class="empty">Aucun programme complet.</div>'));
   S.fullPrograms.forEach(p=>{
-    const it=el(`<div class="list-item"><div class="name">${esc(p.name)}</div><div class="meta">${p.exercises.length} exo</div>
+    const it=el(`<div class="list-item"><div class="name grow">${esc(p.name)}</div><div class="meta">${p.exercises.length} exo</div>
+      <button class="btn sm ghost" data-send>Envoyer à</button>
       <button class="btn sm" data-edit>Modifier</button>
       <button class="btn sm ghost" data-dup>Dupliquer</button>
       <button class="btn sm danger" data-del>Suppr.</button></div>`);
+    it.querySelector('[data-send]').onclick=()=>sendProgramModal(p.name, ()=>({apparatus:'complet', programName:p.name, exercises:p.exercises.map(e=>cloneExercise(e))}));
     it.querySelector('[data-edit]').onclick=()=>nav('build',{tab:'complet',prog:p.id});
     it.querySelector('[data-dup]').onclick=async()=>{ const c={...JSON.parse(JSON.stringify(p)),id:uid(),name:p.name+' (copie)'}; await saveFull(c); S.fullPrograms.push(c); nav('build',{tab:'complet'}); };
     it.querySelector('[data-del]').onclick=()=>confirmModal('Supprimer',`Supprimer « ${p.name} » ?`,async()=>{ await DB.del('fullPrograms',p.id); cloudRemove('fullPrograms',p.id); S.fullPrograms=S.fullPrograms.filter(x=>x.id!==p.id); nav('build',{tab:'complet'}); });
@@ -1707,11 +1792,12 @@ function adminScreen(){
   const gy=el(`<div class="card"><h2 style="margin-top:2px">Gestion des gyms</h2></div>`);
   if(!S.gymnasts.length) gy.appendChild(el('<div class="muted">Aucune gymnaste.</div>'));
   S.gymnasts.slice().sort((a,b)=>a.name.localeCompare(b.name)).forEach(g=>{
+    ensureSessions(g);
     const it=el(`<div class="list-item"><div class="name">${esc(g.name)}</div>
-      <div class="meta">${g.session?'séance en cours':''}</div>
-      <button class="btn sm ghost" data-reset>Réinit. séance</button>
+      <div class="meta">${g.sessions.length?g.sessions.length+' séance(s)':''}</div>
+      <button class="btn sm ghost" data-reset>Réinit. séances</button>
       <button class="btn sm danger" data-del>Suppr.</button></div>`);
-    it.querySelector('[data-reset]').onclick=()=>confirmModal('Réinitialiser',`Effacer la séance en cours de ${g.name} ?`,async()=>{ g.session=null; await saveGym(g); nav('admin'); },{yesText:'Effacer',danger:false});
+    it.querySelector('[data-reset]').onclick=()=>confirmModal('Réinitialiser',`Effacer toutes les séances de ${g.name} ?`,async()=>{ g.sessions=[]; await saveGym(g); nav('admin'); },{yesText:'Effacer',danger:false});
     it.querySelector('[data-del]').onclick=()=>confirmModal('Supprimer',`Supprimer ${g.name} ?`,async()=>{ await DB.del('gymnasts',g.id); cloudRemove('gymnasts',g.id); S.gymnasts=S.gymnasts.filter(x=>x.id!==g.id); nav('admin'); });
     gy.appendChild(it);
   });
