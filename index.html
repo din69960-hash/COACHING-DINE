@@ -937,7 +937,7 @@ function tabComplets(g){
       <button class="btn sm g" data-start>▶ Démarrer</button>
       <button class="btn sm danger" data-del>Suppr.</button></div>`);
     it.querySelector('[data-start]').onclick=()=>{
-      const items=[{apparatus:'complet',programName:p.name,exercises:p.exercises.map(e=>cloneExercise(e))}];
+      const items=[{apparatus:'complet',programName:p.name,consignesGenerales:p.consignesGenerales||'',exercises:p.exercises.map(e=>cloneExercise(e))}];
       commitSession(g,items);
     };
     it.querySelector('[data-del]').onclick=()=>confirmModal('Supprimer',`Supprimer le programme complet « ${p.name} » ? Il sera retiré pour toutes les gyms.`,async()=>{
@@ -965,7 +965,7 @@ function startSession(g,draft){
   APPARATUS.forEach(a=>{
     (draft[a.key]||[]).forEach(pid=>{
       const p=S.programs.find(x=>x.id===pid); if(!p) return;
-      items.push({apparatus:a.key, programName:p.name, exercises:p.exercises.map(e=>cloneExercise(e))});
+      items.push({apparatus:a.key, programName:p.name, consignesGenerales:p.consignesGenerales||'', exercises:p.exercises.map(e=>cloneExercise(e))});
     });
   });
   commitSession(g,items);
@@ -1028,11 +1028,13 @@ function renderSession(g, sess){
   sess = sess || (g.sessions && g.sessions[0]);
   const n=el('<div></div>');
   let backfilled=false;
-  // Retrouve l'exercice d'origine (pour récupérer un objectif ajouté après le démarrage)
+  // Retrouve le programme d'origine (pour objectif, consigne, consignes générales)
+  const sourceProgramFor=(item)=>{
+    if(item.apparatus==='complet') return S.fullPrograms.find(p=>p.name===item.programName)||null;
+    return S.programs.find(p=>p.name===item.programName && p.apparatus===item.apparatus)||null;
+  };
   const sourceExerciseFor=(item,ex)=>{
-    let prog=null;
-    if(item.apparatus==='complet') prog=S.fullPrograms.find(p=>p.name===item.programName);
-    else prog=S.programs.find(p=>p.name===item.programName && p.apparatus===item.apparatus);
+    const prog=sourceProgramFor(item);
     if(!prog) return null;
     return prog.exercises.find(e=>e.title===ex.title) || null;
   };
@@ -1041,6 +1043,12 @@ function renderSession(g, sess){
     n.appendChild(el(`<div class="flex" style="margin:14px 0 8px">
       <span class="chip" style="background:${meta.chip}">${esc(meta.label)}</span>
       <b class="grow">${esc(item.programName)}</b></div>`));
+    // Consignes générales (synchro live depuis le programme d'origine)
+    {
+      const srcProg=sourceProgramFor(item);
+      const cg=(srcProg && srcProg.consignesGenerales) || item.consignesGenerales || '';
+      if(cg) n.appendChild(el(`<div class="objectif-box" style="background:#eef3fe;border-color:#cfe0fb;color:#254a86">📋 <b>Consignes :</b> ${esc(cg)}</div>`));
+    }
     // Groupe réordonnable : chaque exercice est glissable (poignée ⠿)
     const group=el('<div class="sort-group"></div>');
     item.exercises.forEach(ex=>{
@@ -1462,7 +1470,7 @@ function buildAgres(){
       <button class="btn sm ghost" data-send>Envoyer à</button>
       <button class="btn sm" data-edit>Modifier</button>
       <button class="btn sm danger" data-del>Suppr.</button></div>`);
-    it.querySelector('[data-send]').onclick=()=>sendProgramModal(p.name, ()=>({apparatus:p.apparatus, programName:p.name, exercises:p.exercises.map(e=>cloneExercise(e))}));
+    it.querySelector('[data-send]').onclick=()=>sendProgramModal(p.name, ()=>({apparatus:p.apparatus, programName:p.name, consignesGenerales:p.consignesGenerales||'', exercises:p.exercises.map(e=>cloneExercise(e))}));
     it.querySelector('[data-edit]').onclick=()=>nav('build',{tab:'agres',app,prog:p.id});
     it.querySelector('[data-del]').onclick=()=>confirmModal('Supprimer',`Supprimer le programme « ${p.name} » ?`,async()=>{
       await DB.del('programs',p.id); cloudRemove('programs',p.id); S.programs=S.programs.filter(x=>x.id!==p.id); nav('build',{tab:'agres',app});
@@ -1491,6 +1499,13 @@ function programEditor(kind,app,progId){
   n.appendChild(el(`<div class="flex" style="margin:6px 0 4px">
     <span class="chip" style="background:${meta.chip}">${esc(meta.label)}</span>
     <b class="grow" style="font-size:19px">${esc(p.name)}</b></div>`));
+  // Consignes générales du programme (affichées avant la séance côté gym)
+  const cg=el(`<div style="margin:6px 0 12px">
+    <label class="fld">Consignes générales</label>
+    <textarea class="inp" placeholder="Consignes à lire avant la séance…">${esc(p.consignesGenerales||'')}</textarea>
+  </div>`);
+  cg.querySelector('textarea').oninput=e=>{ p.consignesGenerales=e.target.value; save(p); };
+  n.appendChild(cg);
   n.appendChild(el('<p class="muted" style="margin:0 0 14px;font-size:12.5px">Astuce : glisse la poignée ⠿ pour réordonner tes exercices.</p>'));
 
   const list=el('<div class="exolist"></div>');
@@ -1580,7 +1595,7 @@ function buildComplet(){
       <button class="btn sm" data-edit>Modifier</button>
       <button class="btn sm ghost" data-dup>Dupliquer</button>
       <button class="btn sm danger" data-del>Suppr.</button></div>`);
-    it.querySelector('[data-send]').onclick=()=>sendProgramModal(p.name, ()=>({apparatus:'complet', programName:p.name, exercises:p.exercises.map(e=>cloneExercise(e))}));
+    it.querySelector('[data-send]').onclick=()=>sendProgramModal(p.name, ()=>({apparatus:'complet', programName:p.name, consignesGenerales:p.consignesGenerales||'', exercises:p.exercises.map(e=>cloneExercise(e))}));
     it.querySelector('[data-edit]').onclick=()=>nav('build',{tab:'complet',prog:p.id});
     it.querySelector('[data-dup]').onclick=async()=>{ const c={...JSON.parse(JSON.stringify(p)),id:uid(),name:p.name+' (copie)'}; await saveFull(c); S.fullPrograms.push(c); nav('build',{tab:'complet'}); };
     it.querySelector('[data-del]').onclick=()=>confirmModal('Supprimer',`Supprimer « ${p.name} » ?`,async()=>{ await DB.del('fullPrograms',p.id); cloudRemove('fullPrograms',p.id); S.fullPrograms=S.fullPrograms.filter(x=>x.id!==p.id); nav('build',{tab:'complet'}); });
