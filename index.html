@@ -155,10 +155,20 @@
   .drag-placeholder{border:2px dashed var(--go);border-radius:16px;background:#fff4f4;margin-bottom:16px}
 
   table.grid{width:100%;border-collapse:collapse;font-size:13.5px}
-  table.grid th,table.grid td{border:1px solid var(--line);padding:6px;text-align:center;vertical-align:middle}
+  table.grid th,table.grid td{border:1px solid var(--line);padding:5px 3px;text-align:center;vertical-align:middle}
   table.grid th{background:#f2f4fa;font-size:11.5px;text-transform:uppercase;letter-spacing:.4px;color:var(--muted);font-weight:800}
-  table.grid select,table.grid input{width:100%;min-width:60px;padding:7px 4px;border:1px solid var(--line);border-radius:8px;text-align:center;background:#fff}
+  table.grid select,table.grid input{width:100%;min-width:44px;padding:6px 2px;border:1px solid var(--line);border-radius:8px;text-align:center;background:#fff}
   table.grid .colhead{position:relative}
+  /* Compactage mobile : police réduite + colonnes plus étroites pour en voir plus */
+  @media(max-width:560px){
+    table.grid{font-size:11px}
+    table.grid th{font-size:9px;letter-spacing:0;padding:3px 2px}
+    table.grid td{padding:3px 2px}
+    table.grid td[style]{min-width:0!important}         /* neutralise les largeurs mini fixes */
+    table.grid select,table.grid input{min-width:32px!important;padding:4px 1px;font-size:11px}
+    .recup-time,.recup-form-tag{font-size:10px;padding:2px 4px;white-space:normal}
+    .tblwrap{margin:0 -10px;padding:0 10px}
+  }
   .dupbtn{font-size:10.5px;font-weight:700;color:var(--ink);background:#eef1fa;border-radius:7px;padding:2px 6px;margin-top:3px;display:inline-block}
   .addcol{font-size:11px;font-weight:800;color:#fff;background:var(--ink);border-radius:7px;padding:2px 7px;margin-left:5px}
   .tblwrap{overflow-x:auto;-webkit-overflow-scrolling:touch;margin:0 -14px;padding:0 14px}
@@ -456,7 +466,11 @@ const saveFull = async (p) => { await DB.put('fullPrograms',p); cloudPush('fullP
 /* ============================================================
    Factories
    ============================================================ */
-function newRow(){ return {repetition:10, execution:EXEC[1], recupMin:1, recupSec:0, recupForm:'passive', recupVideoId:null}; }
+function newRow(){ return {repType:'mouvement', repetition:10, repMin:0, repSec:30, poidsType:'saisie', poids:'', execution:EXEC[1], recupMin:1, recupSec:0, recupForm:'passive', recupVideoId:null}; }
+/* Type de répétition d'une ligne : 'mouvement' | 'statique' (compat anciennes données) */
+function rowRepType(row){ return row.repType || 'mouvement'; }
+/* Type de poids d'une ligne : 'saisie' (poids chiffré) | 'corps' (poids de corps) */
+function rowPoidsType(row){ return row.poidsType || 'saisie'; }
 /* Forme de récup d'une ligne : 'passive' | 'active' | 'media' (compat anciennes données) */
 function rowRecupForm(row){ if(row.recupForm) return row.recupForm; return row.recupVideoId ? 'media' : 'passive'; }
 function newExercise(n){
@@ -558,8 +572,14 @@ function makeSortable(container, itemSelector, onReorder){
    Progress feedback
    ============================================================ */
 function exerciseFeedback(ex, colIndex){
-  const target = ex.rows.reduce((s,r)=>s+Number(r.repetition||0),0);
-  const done   = ex.realisations[colIndex].values.reduce((s,v)=>s+Number(v||0),0);
+  // On ne compte que les lignes "mouvement" (les lignes statiques = temps, hors objectif de reps)
+  let target=0, done=0;
+  ex.rows.forEach((r,i)=>{
+    if((r.repType||'mouvement')==='mouvement'){
+      target += Number(r.repetition||0);
+      done   += Number(ex.realisations[colIndex].values[i]||0);
+    }
+  });
   if(target<=0) return null;
   const pct = done/target*100;
   if(done>=target) return {cls:'fb-bravo', text:'🎉 Bravo, tu as réussi ton objectif — appelle ton entraîneur !'};
@@ -788,12 +808,18 @@ function gymProfile(){
 /* -- Poursuivre : dernière séance saisie -- */
 function tabPoursuivre(g){
   const n=el('<div></div>');
-  if(!g.session){
+  const hasHist = g.history && g.history.length;
+  if(!g.session && !hasHist){
     n.appendChild(el('<div class="empty">Aucune séance en cours.<br>Va sur « Nouveaux programmes » ou « Programmes complets » pour en démarrer une.</div>'));
     return n;
   }
-  n.appendChild(el(`<p class="muted" style="margin-top:-4px">Séance démarrée le ${new Date(g.session.startedAt).toLocaleDateString('fr-FR',{weekday:'long',day:'numeric',month:'long'})}. Les données saisies sont conservées.</p>`));
-  n.appendChild(renderSession(g));
+  const sess = g.session || g.history[g.history.length-1];
+  const archived = !g.session;
+  const dateStr = new Date(sess.startedAt).toLocaleDateString('fr-FR',{weekday:'long',day:'numeric',month:'long'});
+  n.appendChild(el(`<p class="muted" style="margin-top:-4px">${archived
+      ? 'Dernière séance (archivée) du '+dateStr+'. Tes résultats sont conservés — tu peux les revoir et la reprendre.'
+      : 'Séance démarrée le '+dateStr+'. Les données saisies sont conservées.'}</p>`));
+  n.appendChild(renderSession(g, sess, archived));
   return n;
 }
 
@@ -914,7 +940,8 @@ async function commitSession(g,items){
 /* ============================================================
    SESSION VIEW (gymnaste saisit ses réalisations)
    ============================================================ */
-function renderSession(g){
+function renderSession(g, sess, archived){
+  sess = sess || g.session;
   const n=el('<div></div>');
   let backfilled=false;
   // Retrouve l'exercice d'origine (pour récupérer un objectif ajouté après le démarrage)
@@ -925,7 +952,7 @@ function renderSession(g){
     if(!prog) return null;
     return prog.exercises.find(e=>e.title===ex.title) || null;
   };
-  g.session.items.forEach((item,ii)=>{
+  sess.items.forEach((item,ii)=>{
     const meta = item.apparatus==='complet' ? {label:'Programme complet',chip:'var(--ink)'} : APP_META[item.apparatus];
     n.appendChild(el(`<div class="flex" style="margin:14px 0 8px">
       <span class="chip" style="background:${meta.chip}">${esc(meta.label)}</span>
@@ -933,11 +960,12 @@ function renderSession(g){
     // Groupe réordonnable : chaque exercice est glissable (poignée ⠿)
     const group=el('<div class="sort-group"></div>');
     item.exercises.forEach(ex=>{
-      // Rattrapage : objectif/consigne ajoutés après le démarrage de la séance
-      if(!ex.objectif || !ex.consigne){
+      // Synchro avec le programme d'origine : l'objectif suit toujours la dernière valeur
+      // (la consigne n'est complétée que si elle est vide côté gym)
+      {
         const src=sourceExerciseFor(item,ex);
         if(src){
-          if(!ex.objectif && src.objectif){ ex.objectif=src.objectif; backfilled=true; }
+          if((ex.objectif||'')!==(src.objectif||'')){ ex.objectif=src.objectif||''; backfilled=true; }
           if(!ex.consigne && src.consigne){ ex.consigne=src.consigne; backfilled=true; }
         }
       }
@@ -954,21 +982,37 @@ function renderSession(g){
     });
   });
   if(backfilled) saveGym(g);
-  const bar=el(`<div class="selbar"><div class="rowbtns">
-    <button class="btn line grow" data-finish>Terminer & archiver la séance</button>
-  </div></div>`);
-  bar.querySelector('[data-finish]').onclick=()=>confirmModal('Terminer','Archiver cette séance ? Elle passera dans l’historique.',async()=>{
-    g.history=g.history||[]; g.history.push({...g.session,endedAt:Date.now()}); g.session=null;
-    await saveGym(g); toast('Séance archivée'); nav('gymProfile',{id:g.id,tab:'poursuivre'});
-  },{yesText:'Archiver',danger:false});
-  n.appendChild(bar);
+  if(!archived){
+    // Séance active : on peut la terminer / archiver
+    const bar=el(`<div class="selbar"><div class="rowbtns">
+      <button class="btn line grow" data-finish>Terminer & archiver la séance</button>
+    </div></div>`);
+    bar.querySelector('[data-finish]').onclick=()=>confirmModal('Terminer','Archiver cette séance ? Elle restera consultable dans « Poursuivre le programme ».',async()=>{
+      g.history=g.history||[]; g.history.push({...g.session,endedAt:Date.now()}); g.session=null;
+      await saveGym(g); toast('Séance archivée'); nav('gymProfile',{id:g.id,tab:'poursuivre'});
+    },{yesText:'Archiver',danger:false});
+    n.appendChild(bar);
+  } else {
+    // Séance archivée : on peut la reprendre pour repartir sur une nouvelle séance active
+    const bar=el(`<div class="selbar"><div class="rowbtns">
+      <button class="btn g grow" data-resume>Reprendre cette séance</button>
+    </div></div>`);
+    bar.querySelector('[data-resume]').onclick=()=>confirmModal('Reprendre','Reprendre cette séance ? Elle redeviendra ta séance en cours.',async()=>{
+      const idx=g.history.indexOf(sess);
+      if(idx>=0) g.history.splice(idx,1);
+      delete sess.endedAt;
+      g.session=sess;
+      await saveGym(g); toast('Séance reprise'); nav('gymProfile',{id:g.id,tab:'poursuivre'});
+    },{yesText:'Reprendre',danger:false});
+    n.appendChild(bar);
+  }
   return n;
 }
 
 /* ============================================================
    EXERCISE CARD (shared) — mode: 'edit' | 'session'
    ============================================================ */
-function renderExerciseCard(ex, {mode='edit', onChange, onDelete, onDuplicate, exIndex, dragHandle=false}={}){
+function renderExerciseCard(ex, {mode='edit', onChange, onDelete, onDuplicate, exIndex, dragHandle=false, readonly=false}={}){
   const edit = mode==='edit';
   const card=el(`<div class="exo"></div>`);
   // head
@@ -1031,24 +1075,23 @@ function renderExerciseCard(ex, {mode='edit', onChange, onDelete, onDuplicate, e
   }
 
   // GRID
-  const wrap=el('<div class="tblwrap"></div>');
-  const table=el(`<table class="grid"></table>`);
+  const wrap=el(`<div class="tblwrap${edit?'':' tblwrap-session'}"></div>`);
+  const table=el(`<table class="grid${edit?'':' session'}"></table>`);
   // header row
   const thead=el('<thead></thead>');
   const htr=el('<tr></tr>');
   htr.appendChild(el('<th>Série</th>'));
-  htr.appendChild(el('<th>Répétition</th>'));
+  htr.appendChild(el('<th>Reps</th>'));
+  htr.appendChild(el('<th>Poids</th>'));
   htr.appendChild(el('<th>Exécution</th>'));
   htr.appendChild(el('<th>Récup.</th>'));
   htr.appendChild(el('<th>Forme récup.</th>'));
-  // Réalisation columns (séances)
+  // Réalisation columns (séances) — chaque colonne a un menu (+ = ajouter / supprimer)
   ex.realisations.forEach((col,ci)=>{
     const th=el(`<th class="colhead">${esc(col.title)}</th>`);
-    if(ci===ex.realisations.length-1){
-      const add=el('<span class="addcol">＋ séance</span>');
-      add.onclick=()=>{ ex.realisations.push({title:'Séance '+(ex.realisations.length+1),values:ex.rows.map(()=>0)}); onChange&&onChange(); rerender(); };
-      th.appendChild(add);
-    }
+    const menu=el('<span class="addcol" title="Options de la séance">＋</span>');
+    menu.onclick=()=>seanceMenu(ex,ci,onChange,rerender);
+    th.appendChild(menu);
     htr.appendChild(th);
   });
   thead.appendChild(htr); table.appendChild(thead);
@@ -1056,17 +1099,57 @@ function renderExerciseCard(ex, {mode='edit', onChange, onDelete, onDuplicate, e
   const tbody=el('<tbody></tbody>');
   ex.rows.forEach((row,ri)=>{
     const tr=el('<tr></tr>');
-    tr.appendChild(el(`<td><b>${ri+1}</b></td>`));
-    // repetition
-    const tdRep=el('<td></td>');
+    tr.appendChild(el(`<td data-label="Série"><b>${ri+1}</b></td>`));
+    // repetition : Mouvements (nombre) ou Statique (temps)
+    const tdRep=el(`<td data-label="Reps" style="min-width:92px"></td>`);
+    const rt=rowRepType(row);
     if(edit){
-      const s=el(`<select>${Array.from({length:31},(_,i)=>i).map(v=>`<option ${v===Number(row.repetition)?'selected':''}>${v}</option>`).join('')}</select>`);
-      s.onchange=()=>{row.repetition=Number(s.value);onChange&&onChange();refreshFeedback();};
-      tdRep.appendChild(s);
-    } else tdRep.textContent=row.repetition;
+      const typeSel=el(`<select>
+        <option value="mouvement"${rt==='mouvement'?' selected':''}>Mouvements</option>
+        <option value="statique"${rt==='statique'?' selected':''}>Statique</option>
+      </select>`);
+      typeSel.onchange=()=>{ row.repType=typeSel.value; onChange&&onChange(); rerender(); };
+      tdRep.appendChild(typeSel);
+      if(rt==='mouvement'){
+        const s=el(`<select style="margin-top:6px">${Array.from({length:31},(_,i)=>i).map(v=>`<option ${v===Number(row.repetition)?'selected':''}>${v}</option>`).join('')}</select>`);
+        s.onchange=()=>{row.repetition=Number(s.value);onChange&&onChange();refreshFeedback();};
+        tdRep.appendChild(s);
+      } else {
+        const mm=el(`<select style="min-width:40px">${Array.from({length:11},(_,i)=>i).map(v=>`<option ${v===Number(row.repMin||0)?'selected':''}>${v}</option>`).join('')}</select>`);
+        const ss=el(`<select style="min-width:40px">${[0,5,10,15,20,25,30,35,40,45,50,55].map(v=>`<option ${v===Number(row.repSec||0)?'selected':''}>${v}</option>`).join('')}</select>`);
+        mm.onchange=()=>{row.repMin=Number(mm.value);onChange&&onChange();};
+        ss.onchange=()=>{row.repSec=Number(ss.value);onChange&&onChange();};
+        const box=el('<div class="flex" style="gap:4px;justify-content:center;margin-top:6px"></div>');
+        box.appendChild(mm);box.appendChild(el('<span>′</span>'));box.appendChild(ss);box.appendChild(el('<span>″</span>'));
+        tdRep.appendChild(box);
+      }
+    } else {
+      if(rt==='mouvement') tdRep.textContent=row.repetition;
+      else tdRep.innerHTML=`<span class="recup-time">${String(row.repMin||0).padStart(2,'0')} min : ${String(row.repSec||0).padStart(2,'0')} sec</span>`;
+    }
     tr.appendChild(tdRep);
+    // poids : "Saisissez votre poids" (chiffres, kg) ou "Poids de corps"
+    const tdPoids=el('<td data-label="Poids" style="min-width:92px"></td>');
+    const pt=rowPoidsType(row);
+    if(edit){
+      const psel=el(`<select>
+        <option value="saisie"${pt==='saisie'?' selected':''}>Saisissez votre poids</option>
+        <option value="corps"${pt==='corps'?' selected':''}>Poids de corps</option>
+      </select>`);
+      psel.onchange=()=>{ row.poidsType=psel.value; onChange&&onChange(); rerender(); };
+      tdPoids.appendChild(psel);
+      if(pt==='saisie'){
+        const inp=el(`<input type="text" inputmode="decimal" value="${esc(row.poids||'')}" placeholder="kg" style="margin-top:6px">`);
+        inp.oninput=()=>{ inp.value=inp.value.replace(/[^0-9.,]/g,''); row.poids=inp.value; onChange&&onChange(); };
+        tdPoids.appendChild(inp);
+      }
+    } else {
+      if(pt==='corps') tdPoids.innerHTML=`<span class="recup-form-tag">Poids de corps</span>`;
+      else tdPoids.textContent = row.poids ? (row.poids+' kg') : '—';
+    }
+    tr.appendChild(tdPoids);
     // execution
-    const tdEx=el('<td></td>');
+    const tdEx=el('<td data-label="Exécution"></td>');
     if(edit){
       const s=el(`<select>${EXEC.map(v=>`<option ${v===row.execution?'selected':''}>${v.replace('Exécution ','')}</option>`).join('')}</select>`);
       s.onchange=()=>{row.execution='Exécution '+s.value;onChange&&onChange();};
@@ -1074,10 +1157,10 @@ function renderExerciseCard(ex, {mode='edit', onChange, onDelete, onDuplicate, e
     } else tdEx.textContent=(row.execution||'').replace('Exécution ','');
     tr.appendChild(tdEx);
     // recup min:sec
-    const tdRec=el('<td></td>');
+    const tdRec=el('<td data-label="Récup."></td>');
     if(edit){
-      const mm=el(`<select style="min-width:52px">${Array.from({length:11},(_,i)=>i).map(v=>`<option ${v===Number(row.recupMin)?'selected':''}>${v}</option>`).join('')}</select>`);
-      const ss=el(`<select style="min-width:52px">${[0,5,10,15,20,25,30,35,40,45,50,55].map(v=>`<option ${v===Number(row.recupSec)?'selected':''}>${v}</option>`).join('')}</select>`);
+      const mm=el(`<select style="min-width:40px">${Array.from({length:11},(_,i)=>i).map(v=>`<option ${v===Number(row.recupMin)?'selected':''}>${v}</option>`).join('')}</select>`);
+      const ss=el(`<select style="min-width:40px">${[0,5,10,15,20,25,30,35,40,45,50,55].map(v=>`<option ${v===Number(row.recupSec)?'selected':''}>${v}</option>`).join('')}</select>`);
       mm.onchange=()=>{row.recupMin=Number(mm.value);onChange&&onChange();};
       ss.onchange=()=>{row.recupSec=Number(ss.value);onChange&&onChange();};
       const box=el('<div class="flex" style="gap:4px;justify-content:center"></div>');
@@ -1086,7 +1169,7 @@ function renderExerciseCard(ex, {mode='edit', onChange, onDelete, onDuplicate, e
     } else tdRec.innerHTML=`<span class="recup-time">${String(row.recupMin).padStart(2,'0')} min : ${String(row.recupSec).padStart(2,'0')} sec</span>`;
     tr.appendChild(tdRec);
     // forme de récup : Passive / Active / Média (+ média si "Média")
-    const tdForm=el('<td style="min-width:110px"></td>');
+    const tdForm=el(`<td data-label="Forme récup." style="min-width:88px"></td>`);
     const curForm=rowRecupForm(row);
     if(edit){
       const sf=el(`<select>
@@ -1111,10 +1194,15 @@ function renderExerciseCard(ex, {mode='edit', onChange, onDelete, onDuplicate, e
     tr.appendChild(tdForm);
     // realisations
     ex.realisations.forEach((col,ci)=>{
-      const td=el('<td></td>');
-      const s=el(`<select>${Array.from({length:31},(_,i)=>i).map(v=>`<option ${v===Number(col.values[ri])?'selected':''}>${v}</option>`).join('')}</select>`);
-      s.onchange=()=>{col.values[ri]=Number(s.value);onChange&&onChange();refreshFeedback();};
-      td.appendChild(s); tr.appendChild(td);
+      const td=el(`<td data-label="${esc(col.title)}"></td>`);
+      if(readonly){
+        td.innerHTML=`<b>${Number(col.values[ri]||0)}</b>`;
+      } else {
+        const s=el(`<select>${Array.from({length:31},(_,i)=>i).map(v=>`<option ${v===Number(col.values[ri])?'selected':''}>${v}</option>`).join('')}</select>`);
+        s.onchange=()=>{col.values[ri]=Number(s.value);onChange&&onChange();refreshFeedback();};
+        td.appendChild(s);
+      }
+      tr.appendChild(td);
     });
     tbody.appendChild(tr);
   });
@@ -1139,7 +1227,7 @@ function renderExerciseCard(ex, {mode='edit', onChange, onDelete, onDuplicate, e
 
   // rerender helper: replace this card in place
   function rerender(){
-    const fresh=renderExerciseCard(ex,{mode,onChange,onDelete,onDuplicate,exIndex,dragHandle});
+    const fresh=renderExerciseCard(ex,{mode,onChange,onDelete,onDuplicate,exIndex,dragHandle,readonly});
     card.replaceWith(fresh);
   }
   return card;
@@ -1369,6 +1457,26 @@ function plusMenu(p,afterIndex,save,refresh){
   const dup=body.querySelector('[data-dup]');
   if(dup) dup.onclick=async()=>{ const src=p.exercises[afterIndex]; p.exercises.splice(afterIndex+1,0,cloneExercise(src,p.exercises.length+1)); await save(p); closeModal(); refresh(); };
   modal('Ajouter un tableau',body);
+}
+
+/* Menu d'une colonne "Séance N" (résultats) : ajouter une séance ou supprimer celle-ci */
+function seanceMenu(ex, ci, onChange, rerender){
+  const title = ex.realisations[ci] ? ex.realisations[ci].title : 'Séance';
+  const body=el(`<div class="btnrow" style="flex-direction:column">
+    <button class="btn" data-add>＋ Ajouter une séance</button>
+    <button class="btn danger" data-del>🗑 Supprimer « ${esc(title)} »</button>
+  </div>`);
+  body.querySelector('[data-add]').onclick=()=>{
+    ex.realisations.push({title:'Séance '+(ex.realisations.length+1), values:ex.rows.map(()=>0)});
+    onChange&&onChange(); closeModal(); rerender&&rerender();
+  };
+  body.querySelector('[data-del]').onclick=()=>{
+    if(ex.realisations.length<=1){ toast('Il faut garder au moins une séance'); return; }
+    ex.realisations.splice(ci,1);
+    ex.realisations.forEach((c,i)=>{ c.title='Séance '+(i+1); }); // renumérote proprement
+    onChange&&onChange(); closeModal(); rerender&&rerender();
+  };
+  modal('Séance — options', body);
 }
 
 /* -- Programme complet tab -- */
