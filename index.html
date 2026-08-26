@@ -833,13 +833,18 @@ function tabPoursuivre(g){
     n.appendChild(el('<div class="empty">Aucune séance pour l’instant.<br>L’entraîneur peut t’en envoyer, ou démarres-en une dans « Nouveaux programmes » / « Programmes complets ».</div>'));
     return n;
   }
-  n.appendChild(el('<p class="muted" style="margin-top:-4px">Choisis une séance à suivre.</p>'));
-  const sorted=g.sessions.slice().sort((a,b)=>(a.archived-b.archived) || (b.startedAt-a.startedAt));
-  sorted.forEach(sess=>{
+  n.appendChild(el('<p class="muted" style="margin-top:-4px">Choisis une séance à suivre. Glisse la poignée ⠿ pour changer l’ordre.</p>'));
+
+  const active   = g.sessions.filter(s=>!s.archived);
+  const archived = g.sessions.filter(s=> s.archived);
+
+  // Construit une ligne de séance (avec poignée de glissement)
+  function sessItem(sess){
     const names=sess.items.map(it=>it.programName).join(', ')||'Séance';
     const nbExo=sess.items.reduce((s,it)=>s+it.exercises.length,0);
     const dateStr=new Date(sess.startedAt).toLocaleDateString('fr-FR',{day:'numeric',month:'short'});
-    const it=el(`<div class="list-item">
+    const it=el(`<div class="list-item sess-item sort-item">
+      <span class="drag-handle" data-drag-handle title="Glisser pour déplacer">⠿</span>
       <div class="grow"><div class="name">${esc(names)}</div>
         <div class="meta">${nbExo} exo · ${dateStr}${sess.archived?' · archivée':''}</div></div>
       <button class="btn sm" data-open>Ouvrir</button>
@@ -849,8 +854,29 @@ function tabPoursuivre(g){
     it.querySelector('[data-del]').onclick=()=>confirmModal('Supprimer','Supprimer cette séance et ses résultats ?',async()=>{
       g.sessions=g.sessions.filter(s=>s.id!==sess.id); await saveGym(g); nav('gymProfile',{id:g.id,tab:'poursuivre'});
     });
-    n.appendChild(it);
-  });
+    return it;
+  }
+  // Sauvegarde le nouvel ordre : on recolle actives + archivées dans g.sessions
+  function persistOrder(){
+    g.sessions=[...active,...archived];
+    saveGym(g);
+    nav('gymProfile',{id:g.id,tab:'poursuivre'});
+  }
+
+  // --- Séances actives (réordonnables) ---
+  const activeBox=el('<div class="sess-group"></div>');
+  active.forEach(s=>activeBox.appendChild(sessItem(s)));
+  n.appendChild(activeBox);
+  makeSortable(activeBox,'.sess-item',(from,to)=>{ arrayMove(active,from,to); persistOrder(); });
+
+  // --- Séances archivées (réordonnables aussi) ---
+  if(archived.length){
+    n.appendChild(el('<div class="muted" style="font-size:12.5px;margin:18px 0 6px">Séances archivées</div>'));
+    const archBox=el('<div class="sess-group"></div>');
+    archived.forEach(s=>archBox.appendChild(sessItem(s)));
+    n.appendChild(archBox);
+    makeSortable(archBox,'.sess-item',(from,to)=>{ arrayMove(archived,from,to); persistOrder(); });
+  }
   return n;
 }
 
@@ -958,6 +984,14 @@ function ensureSessions(g){
     delete g.session; delete g.history;
     saveGym(g);
   }
+  // Ordre manuel : une seule fois, on fige l'ordre d'affichage actuel
+  // (séances actives d'abord, puis les plus récentes) pour que le
+  // glisser-déposer puisse ensuite réordonner librement la liste.
+  if(!g.sessionsOrdered){
+    g.sessions.sort((a,b)=>((a.archived?1:0)-(b.archived?1:0)) || (b.startedAt-a.startedAt));
+    g.sessionsOrdered=true;
+    saveGym(g);
+  }
   return g.sessions;
 }
 function startSession(g,draft){
@@ -973,7 +1007,7 @@ function startSession(g,draft){
 async function commitSession(g,items){
   ensureSessions(g);
   const sess={id:uid(), archived:false, startedAt:Date.now(), items};
-  g.sessions.push(sess);
+  g.sessions.unshift(sess);
   g._draft={};
   await saveGym(g);
   nav('gymProfile',{id:g.id,tab:'poursuivre',sess:sess.id});
@@ -1011,7 +1045,7 @@ function sendProgramModal(progName, buildItem){
       const item=buildItem();
       const has=g.sessions.some(s=>!s.archived && s.items.some(it=>it.programName===item.programName && it.apparatus===item.apparatus));
       if(has){ already++; continue; }
-      g.sessions.push({id:uid(), archived:false, startedAt:Date.now(), items:[item]});
+      g.sessions.unshift({id:uid(), archived:false, startedAt:Date.now(), items:[item]});
       await saveGym(g); added++;
     }
     closeModal();
