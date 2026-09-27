@@ -153,6 +153,9 @@
   .sort-item{position:relative}
   .sort-item.drag-active{box-shadow:0 16px 46px rgba(20,25,45,.30);border-radius:16px;opacity:.96}
   .drag-placeholder{border:2px dashed var(--go);border-radius:16px;background:#fff4f4;margin-bottom:16px}
+  .drop-into{outline:3px solid var(--ok);outline-offset:-3px;background:#e7f8ef!important}
+  .gl-folder .name{color:var(--ink)}
+  .gl-folder{background:#f7f8fc}
 
   table.grid{width:100%;border-collapse:collapse;font-size:13.5px}
   table.grid th,table.grid td{border:1px solid var(--line);padding:5px 3px;text-align:center;vertical-align:middle}
@@ -238,7 +241,12 @@ const APPARATUS = [
 ];
 const APP_META = Object.fromEntries(APPARATUS.map(a=>[a.key,a]));
 const EXEC = ['Exécution lente','Exécution normale','Exécution rapide','Exécution très rapide'];
-const DEFAULT_SETTINGS = {trainerPass:'Agirs', adminPass:'#Caramel2020*'};
+const DEFAULT_SETTINGS = {};   // plus aucun mot de passe dans le code (hash SHA-256 stocké dans les réglages)
+const PASS_SALT = 'coaching-dine::v1::';
+async function hashPass(p){
+  const buf=await crypto.subtle.digest('SHA-256', new TextEncoder().encode(PASS_SALT+p));
+  return [...new Uint8Array(buf)].map(b=>b.toString(16).padStart(2,'0')).join('');
+}
 const DEFAULT_FOLDER_IDS = ['barre','poutre','sol','saut'];
 const DEFAULT_FOLDERS = [
   {id:'barre',  name:'Barre',  parent:null},
@@ -311,6 +319,7 @@ const Cloud = {
       media:(md.data||[]).map(r=>r.data),
       settings:kvMap["settings"]||null,
       folders:kvMap["folders"]||null,
+      gymFolders:kvMap["gymFolders"]||null,
     };
   },
   async upsert(store,obj){ if(!sb) return; const t=CLOUD_MAP[store]; const {error}=await sb.from(t).upsert({id:obj.id,data:obj,updated_at:new Date().toISOString()}); if(error) throw error; },
@@ -346,6 +355,7 @@ async function pushAllToCloud(){
   S.fullPrograms.forEach(p=>jobs.push(Cloud.upsert("fullPrograms",p)));
   jobs.push(Cloud.upsertKV("settings",S.settings));
   jobs.push(Cloud.upsertKV("folders",S.folders));
+  jobs.push(Cloud.upsertKV("gymFolders",S.gymFolders));
   S.media.filter(m=>m.url).forEach(m=>jobs.push(Cloud.upsertMedia(m)));
   await Promise.all(jobs);
   Cloud.online=true; paintCloudBadge();
@@ -358,6 +368,7 @@ async function cacheToLocal(){
     for(const p of S.fullPrograms) await DB.put("fullPrograms",p);
     await DB.put("kv",{id:"settings",value:S.settings});
     await DB.put("kv",{id:"folders",value:S.folders});
+    await DB.put("kv",{id:"gymFolders",value:S.gymFolders});
   }catch(e){ console.warn("cache local:", e); }
 }
 function normalizeFolders(arr){
@@ -378,6 +389,7 @@ const S = {
   screen:'home',
   params:{},
   gymnasts:[], programs:[], fullPrograms:[], media:[],
+  gymFolders:[],             // dossiers de l'écran « Choisir votre programme »
 };
 const objURLs = {};          // mediaId -> objectURL cache
 function mediaURL(id){
@@ -419,6 +431,8 @@ async function loadAll(){
   const kvF = await DB.get("kv","folders");
   const localSettings = kvS ? kvS.value : null;
   const localFolders  = kvF ? kvF.value : null;
+  const kvGF = await DB.get("kv","gymFolders");
+  const localGymFolders = kvGF ? kvGF.value : null;
 
   // Tentative cloud
   let cloud=null;
@@ -445,6 +459,8 @@ async function loadAll(){
     S.folders  = normalizeFolders(localFolders);
   }
 
+  S.gymFolders = (cloud && cloud.gymFolders) || localGymFolders || [];
+
   // --- Medias : metadata cloud (URL) + blobs locaux pas encore envoyes ---
   if(cloud){
     const localBlobs={}; localMedia.forEach(m=>{ if(m.blob) localBlobs[m.id]=m.blob; });
@@ -459,6 +475,18 @@ async function loadAll(){
 }
 const saveSettings = async () => { await DB.put('kv',{id:'settings',value:S.settings}); cloudPushKV('settings',S.settings); };
 const saveFolders  = async () => { await DB.put('kv',{id:'folders',value:S.folders}); cloudPushKV('folders',S.folders); };
+const saveGymFolders = async () => { await DB.put('kv',{id:'gymFolders',value:S.gymFolders}); cloudPushKV('gymFolders',S.gymFolders); };
+/* Migration : anciens mots de passe en clair -> hash, puis suppression du clair */
+async function migratePasswords(){
+  let changed=false;
+  for(const [plain,h] of [['trainerPass','trainerHash'],['adminPass','adminHash']]){
+    if(S.settings[plain]){
+      if(!S.settings[h]) S.settings[h]=await hashPass(S.settings[plain]);
+      delete S.settings[plain]; changed=true;
+    }
+  }
+  if(changed) await saveSettings();
+}
 const saveGym  = async (g) => { await DB.put('gymnasts',g); cloudPush('gymnasts',g); return g; };
 const saveProg = async (p) => { await DB.put('programs',p); cloudPush('programs',p); return p; };
 const saveFull = async (p) => { await DB.put('fullPrograms',p); cloudPush('fullPrograms',p); return p; };
@@ -514,14 +542,30 @@ function renumberDefaultTitles(list){
    - onReorder(from,to) : callback appelé après un déplacement effectif
    La poignée de glissement porte l'attribut [data-drag-handle]. Délégation sur le
    container => survit aux re-render internes des cartes. */
-function makeSortable(container, itemSelector, onReorder){
-  let dragging=null, phantom=null, offsetY=0, startIndex=-1;
+function makeSortable(container, itemSelector, onReorder, opts={}){
+  let dragging=null, phantom=null, offsetY=0, startIndex=-1, dropTarget=null;
   const getItems=()=>[...container.querySelectorAll(itemSelector)].filter(x=>x!==phantom);
+  function setDrop(t){
+    if(dropTarget===t) return;
+    if(dropTarget) dropTarget.classList.remove('drop-into');
+    dropTarget=t; if(t) t.classList.add('drop-into');
+  }
 
   function onMove(e){
     if(!dragging) return;
     dragging.style.top=(e.clientY-offsetY)+'px';
     const others=getItems().filter(x=>x!==dragging);
+    // Survol du centre d'un dossier => « ranger dedans » plutôt que réordonner
+    if(opts.dropTargetSelector){
+      const hit=others.find(o=>{
+        if(!o.matches(opts.dropTargetSelector)) return false;
+        if(opts.canDropInto && !opts.canDropInto(dragging,o)) return false;
+        const r=o.getBoundingClientRect();
+        return e.clientY>r.top+r.height*0.2 && e.clientY<r.bottom-r.height*0.2;
+      });
+      setDrop(hit||null);
+      if(hit) return;
+    }
     let placed=false;
     for(const o of others){
       const r=o.getBoundingClientRect();
@@ -533,6 +577,8 @@ function makeSortable(container, itemSelector, onReorder){
     if(!dragging) return;
     document.removeEventListener('pointermove',onMove);
     document.removeEventListener('pointerup',onUp);
+    document.removeEventListener('pointercancel',onUp);
+    const target=dropTarget; setDrop(null);
     if(phantom){ container.insertBefore(dragging,phantom); phantom.remove(); }
     dragging.classList.remove('drag-active');
     dragging.removeAttribute('style');
@@ -540,6 +586,7 @@ function makeSortable(container, itemSelector, onReorder){
     const newIndex=items.indexOf(dragging);
     const from=startIndex;
     dragging=null; phantom=null; startIndex=-1;
+    if(target && opts.onDropInto){ opts.onDropInto(from,target); return; }
     if(newIndex>=0 && newIndex!==from) onReorder(from,newIndex);
   }
   container.addEventListener('pointerdown', e=>{
@@ -564,6 +611,7 @@ function makeSortable(container, itemSelector, onReorder){
     item.style.pointerEvents='none';
     document.addEventListener('pointermove',onMove);
     document.addEventListener('pointerup',onUp);
+    document.addEventListener('pointercancel',onUp);
     e.preventDefault();
   });
 }
@@ -703,12 +751,17 @@ function renderHome(){
   return node;
 }
 function askPass(role){
-  const label = role==='admin'?'Mot de passe administrateur':'Mot de passe entraîneur';
+  const key = role==='admin'?'adminHash':'trainerHash';
+  const first = !S.settings[key];
+  const label = first
+    ? (role==='admin'?'Définis le mot de passe administrateur':'Définis le mot de passe entraîneur')
+    : (role==='admin'?'Mot de passe administrateur':'Mot de passe entraîneur');
   promptModal(role==='admin'?'Administrateur':'Entraîneur', label, {
-    type:'password', placeholder:'••••••••', okText:'Entrer',
-    onOk:(v)=>{
-      const ok = role==='admin'? v===S.settings.adminPass : v===S.settings.trainerPass;
-      if(!ok){ toast('Mot de passe incorrect'); return; }
+    type:'password', placeholder:'••••••••', okText:first?'Enregistrer':'Entrer',
+    onOk:async(v)=>{
+      const h=await hashPass(v);
+      if(first){ S.settings[key]=h; await saveSettings(); toast('Mot de passe enregistré'); }
+      else if(h!==S.settings[key]){ toast('Mot de passe incorrect'); return; }
       closeModal(); S.role=role;
       nav(role==='admin'?'admin':'trainerHome');
     }
@@ -722,10 +775,10 @@ function trainerHome(){
   const n=el('<div></div>');
   n.appendChild(header('Espace entraîneur','Que veux-tu faire ?',[{label:'Accueil'}]));
   const tiles=el(`<div class="tiles">
-    <button class="tile" data-gyms><div class="em">🤸‍♀️</div><div class="t">Choisir votre gym</div>
-      <div class="d">Ouvrir un profil, lancer ou poursuivre une séance</div></button>
+    <button class="tile" data-gyms><div class="em">🤸‍♀️</div><div class="t">Choisir votre programme</div>
+      <div class="d">Ouvrir un programme, lancer ou poursuivre une séance</div></button>
     <button class="tile" data-build><div class="em">🧩</div><div class="t">Construire une séance</div>
-      <div class="d">Programmes par agrès, programmes complets, médiathèque</div></button>
+      <div class="d">Programmes par agrès, médiathèque</div></button>
   </div>`);
   tiles.querySelector('[data-gyms]').onclick=()=>nav('gyms');
   tiles.querySelector('[data-build]').onclick=()=>nav('build');
@@ -734,45 +787,144 @@ function trainerHome(){
 }
 
 /* ============================================================
-   CHOISIR VOTRE GYM
+   CHOISIR VOTRE PROGRAMME (liste + dossiers, glisser-déposer)
    ============================================================ */
+const byOrder=(a,b)=>((a.order??0)-(b.order??0)) || String(a.name).localeCompare(String(b.name),'fr');
+function gymFolderById(id){ return S.gymFolders.find(f=>f.id===id)||null; }
+function gymFolderOf(g){ return (g.folderId && gymFolderById(g.folderId)) ? g.folderId : null; }
+function gymsInFolder(fid){ return S.gymnasts.filter(g=>gymFolderOf(g)===(fid||null)).sort(byOrder); }
+function nextOrder(){ return Math.max(-1,...S.gymnasts.map(g=>g.order??0),...S.gymFolders.map(f=>f.order??0))+1; }
+/* Première fois : fige l'ordre alphabétique actuel pour permettre le glisser-déposer */
+function ensureGymOrder(){
+  if(S.gymnasts.some(g=>typeof g.order!=='number')){
+    S.gymnasts.slice().sort((a,b)=>a.name.localeCompare(b.name,'fr')).forEach((g,i)=>{
+      if(typeof g.order!=='number'){ g.order=i; saveGym(g); }
+    });
+  }
+}
+function moveGymModal(g, backParams){
+  const b=el(`<div><label class="fld">Ranger « ${esc(g.name)} » dans</label>
+    <select class="inp"><option value="">— Aucun dossier (liste principale) —</option>
+    ${S.gymFolders.slice().sort(byOrder).map(f=>`<option value="${f.id}" ${gymFolderOf(g)===f.id?'selected':''}>📁 ${esc(f.name)}</option>`).join('')}</select>
+    <div class="spacer"></div><div class="btnrow" style="justify-content:flex-end">
+    <button class="btn ghost" data-x>Annuler</button><button class="btn" data-ok>Déplacer</button></div></div>`);
+  b.querySelector('[data-x]').onclick=closeModal;
+  b.querySelector('[data-ok]').onclick=async()=>{
+    const v=b.querySelector('select').value||null;
+    if(v!==gymFolderOf(g)){ g.folderId=v; g.order=nextOrder(); await saveGym(g); }
+    closeModal(); nav('gyms',backParams);
+  };
+  modal('Déplacer le programme',b);
+}
 function gymsScreen(){
+  ensureGymOrder();
+  const fid=S.params.gf||null;
+  const folder=fid?gymFolderById(fid):null;
+  const here=folder?{gf:folder.id}:{};
   const n=el('<div></div>');
-  n.appendChild(header('Choisir votre gym', null,[
+  const crumbs=[
     {label:'Accueil',to:()=>{S.role=null;nav('home');}},
     {label:'Entraîneur',to:()=>nav('trainerHome')},
-    {label:'Les gyms'}
-  ]));
+  ];
+  if(folder){ crumbs.push({label:'Les programmes',to:()=>nav('gyms')}); crumbs.push({label:folder.name}); }
+  else crumbs.push({label:'Les programmes'});
+  n.appendChild(header(folder?('📁 '+folder.name):'Choisir votre programme', null, crumbs));
+
   const bar=el(`<div class="btnrow" style="margin-bottom:14px">
-    <button class="btn" data-add>＋ Ajouter une gymnaste</button></div>`);
+    ${folder?'<button class="btn line" data-back>‹ Retour</button>':''}
+    <button class="btn" data-add>＋ Ajouter votre programme</button>
+    ${folder?'<button class="btn ghost" data-ren>Renommer le dossier</button>':'<button class="btn ghost" data-addf>📁 Créer un dossier</button>'}
+  </div>`);
+  const back=bar.querySelector('[data-back]'); if(back) back.onclick=()=>nav('gyms');
   bar.querySelector('[data-add]').onclick=()=>{
-    promptModal('Nouvelle gymnaste','Prénom',{placeholder:'ex. Kenza',okText:'Ajouter',onOk:async(name)=>{
-      const g={id:uid(),name,session:null,history:[],createdAt:Date.now()};
-      await saveGym(g); S.gymnasts.push(g); closeModal(); toast('Gymnaste ajoutée'); nav('gyms');
+    promptModal('Nouveau programme','Nom du programme',{placeholder:'ex. LUNDI',okText:'Ajouter',onOk:async(name)=>{
+      const g={id:uid(),name,folderId:fid,order:nextOrder(),sessions:[],sessionsOrdered:true,createdAt:Date.now()};
+      await saveGym(g); S.gymnasts.push(g); closeModal(); toast('Programme ajouté'); nav('gyms',here);
     }});
   };
+  const addf=bar.querySelector('[data-addf]');
+  if(addf) addf.onclick=()=>promptModal('Nouveau dossier','Nom du dossier',{placeholder:'ex. Préparation générale',okText:'Créer',onOk:async(name)=>{
+    S.gymFolders.push({id:uid(),name,order:nextOrder()}); await saveGymFolders(); closeModal(); toast('Dossier créé'); nav('gyms');
+  }});
+  const ren=bar.querySelector('[data-ren]');
+  if(ren) ren.onclick=()=>promptModal('Renommer le dossier','Nom du dossier',{value:folder.name,okText:'Renommer',onOk:async(v)=>{
+    folder.name=v; await saveGymFolders(); closeModal(); nav('gyms',here);
+  }});
   n.appendChild(bar);
 
-  const list=el('<div></div>');
-  if(!S.gymnasts.length){ list.appendChild(el('<div class="empty">Aucune gymnaste pour l’instant.<br>Ajoute un premier prénom pour commencer.</div>')); }
-  else{
-    S.gymnasts.slice().sort((a,b)=>a.name.localeCompare(b.name)).forEach(g=>{
-      ensureSessions(g);
-      const nb=g.sessions.length;
-      const item=el(`<div class="list-item">
-        <div class="name">${esc(g.name)}</div>
-        <div class="meta">${nb?nb+' séance(s)':'—'}</div>
+  // Éléments affichés : à la racine = dossiers + programmes hors dossier ; dans un dossier = ses programmes
+  const entries = folder
+    ? gymsInFolder(fid).map(g=>({kind:'gym',obj:g}))
+    : [...S.gymFolders.map(f=>({kind:'folder',obj:f})), ...gymsInFolder(null).map(g=>({kind:'gym',obj:g}))]
+        .sort((a,b)=>byOrder(a.obj,b.obj));
+
+  if(!entries.length){
+    n.appendChild(el(folder
+      ? '<div class="empty">Dossier vide.<br>Glisse un programme sur ce dossier depuis la liste principale, ou utilise « Déplacer ».</div>'
+      : '<div class="empty">Aucun programme pour l’instant.<br>Ajoute un premier programme pour commencer.</div>'));
+    return n;
+  }
+  n.appendChild(el(`<p class="muted" style="margin-top:-4px;font-size:12.5px">Glisse la poignée ⠿ pour changer l’ordre${folder?'':' — lâche un programme sur un dossier pour l’y ranger'}.</p>`));
+
+  const list=el('<div class="gym-list"></div>');
+  entries.forEach(({kind,obj})=>{
+    if(kind==='folder'){
+      const f=obj, nb=gymsInFolder(f.id).length;
+      const it=el(`<div class="list-item sort-item gl-item gl-folder" data-fid="${f.id}">
+        <span class="drag-handle" data-drag-handle title="Glisser pour déplacer">⠿</span>
+        <div class="grow"><div class="name">📁 ${esc(f.name)}</div><div class="meta">${nb} programme(s)</div></div>
         <button class="btn sm" data-open>Ouvrir</button>
         <button class="btn sm danger" data-del>Suppr.</button>
       </div>`);
-      item.querySelector('[data-open]').onclick=()=>nav('gymProfile',{id:g.id});
-      item.querySelector('[data-del]').onclick=()=>confirmModal('Supprimer',`Supprimer ${g.name} et ses données ?`,async()=>{
-        await DB.del('gymnasts',g.id); cloudRemove('gymnasts',g.id); S.gymnasts=S.gymnasts.filter(x=>x.id!==g.id); toast('Supprimée'); nav('gyms');
+      it.querySelector('[data-open]').onclick=()=>nav('gyms',{gf:f.id});
+      it.querySelector('[data-del]').onclick=()=>confirmModal('Supprimer le dossier',`Supprimer le dossier « ${f.name} » ? Les programmes qu’il contient reviennent dans la liste principale (rien n’est effacé).`,async()=>{
+        for(const g of gymsInFolder(f.id)){ g.folderId=null; g.order=nextOrder(); await saveGym(g); }
+        S.gymFolders=S.gymFolders.filter(x=>x.id!==f.id); await saveGymFolders(); toast('Dossier supprimé'); nav('gyms');
       });
-      list.appendChild(item);
-    });
-  }
+      list.appendChild(it);
+    } else {
+      const g=obj; ensureSessions(g);
+      const nb=g.sessions.length;
+      const it=el(`<div class="list-item sort-item gl-item gl-gym">
+        <span class="drag-handle" data-drag-handle title="Glisser pour déplacer">⠿</span>
+        <div class="name grow">${esc(g.name)}</div>
+        <div class="meta">${nb?nb+' séance(s)':'—'}</div>
+        <button class="btn sm" data-open>Ouvrir</button>
+        ${(S.gymFolders.length||folder)?'<button class="btn sm ghost" data-move>Déplacer</button>':''}
+        <button class="btn sm danger" data-del>Suppr.</button>
+      </div>`);
+      it.querySelector('[data-open]').onclick=()=>nav('gymProfile',{id:g.id});
+      const mv=it.querySelector('[data-move]'); if(mv) mv.onclick=()=>moveGymModal(g,here);
+      it.querySelector('[data-del]').onclick=()=>confirmModal('Supprimer',`Supprimer le programme « ${g.name} » et ses séances ?`,async()=>{
+        await DB.del('gymnasts',g.id); cloudRemove('gymnasts',g.id); S.gymnasts=S.gymnasts.filter(x=>x.id!==g.id); toast('Supprimé'); nav('gyms',here);
+      });
+      list.appendChild(it);
+    }
+  });
   n.appendChild(list);
+
+  makeSortable(list,'.gl-item',
+    (from,to)=>{
+      arrayMove(entries,from,to);
+      let foldersChanged=false;
+      entries.forEach((e,i)=>{
+        if(e.obj.order===i) return;
+        e.obj.order=i;
+        if(e.kind==='gym') saveGym(e.obj); else foldersChanged=true;
+      });
+      if(foldersChanged) saveGymFolders();
+      nav('gyms',here);
+    },
+    {
+      dropTargetSelector:'.gl-folder',
+      canDropInto:(dragEl)=>dragEl.classList.contains('gl-gym'),
+      onDropInto:async(from,target)=>{
+        const e=entries[from]; if(!e || e.kind!=='gym') return;
+        const f=gymFolderById(target.dataset.fid); if(!f) return;
+        e.obj.folderId=f.id; e.obj.order=nextOrder(); await saveGym(e.obj);
+        toast('« '+e.obj.name+' » rangé dans '+f.name); nav('gyms');
+      }
+    });
   return n;
 }
 
@@ -786,14 +938,14 @@ function gymProfile(){
   const tab = S.params.tab || 'poursuivre';
   n.appendChild(header(g.name, null,[
     {label:'Entraîneur',to:()=>nav('trainerHome')},
-    {label:'Les gyms',to:()=>nav('gyms')},
+    {label:'Les programmes',to:()=>nav('gyms')},
+    ...(gymFolderOf(g)?[{label:'📁 '+gymFolderById(g.folderId).name,to:()=>nav('gyms',{gf:g.folderId})}]:[]),
     {label:g.name}
   ]));
 
   const tabs=el(`<div class="pill-tabs">
     <button data-t="poursuivre">Poursuivre le programme</button>
     <button data-t="nouveau">Nouveaux programmes</button>
-    <button data-t="complets">Programmes complets</button>
   </div>`);
   tabs.querySelectorAll('button').forEach(b=>{
     if(b.dataset.t===tab) b.classList.add('on');
@@ -802,8 +954,7 @@ function gymProfile(){
   n.appendChild(tabs);
 
   if(tab==='poursuivre') n.appendChild(tabPoursuivre(g));
-  else if(tab==='nouveau') n.appendChild(tabNouveau(g));
-  else n.appendChild(tabComplets(g));
+  else n.appendChild(tabNouveau(g));
   return n;
 }
 
@@ -830,7 +981,7 @@ function tabPoursuivre(g){
 
   // --- Liste des séances ---
   if(!g.sessions.length){
-    n.appendChild(el('<div class="empty">Aucune séance pour l’instant.<br>L’entraîneur peut t’en envoyer, ou démarres-en une dans « Nouveaux programmes » / « Programmes complets ».</div>'));
+    n.appendChild(el('<div class="empty">Aucune séance pour l’instant.<br>L’entraîneur peut t’en envoyer, ou démarres-en une dans « Nouveaux programmes ».</div>'));
     return n;
   }
   n.appendChild(el('<p class="muted" style="margin-top:-4px">Choisis une séance à suivre. Glisse la poignée ⠿ pour changer l’ordre.</p>'));
@@ -1019,9 +1170,9 @@ function sendProgramModal(progName, buildItem){
   const selected=new Set();
   const body=el('<div></div>');
   if(!gyms.length){
-    body.appendChild(el('<div class="empty">Aucune gymnaste créée.<br>Ajoute-en dans « Choisir votre gym ».</div>'));
+    body.appendChild(el('<div class="empty">Aucun programme créé.<br>Ajoute-en dans « Choisir votre programme ».</div>'));
   } else {
-    body.appendChild(el(`<p class="muted" style="margin-top:0">Sélectionne les gyms qui recevront « ${esc(progName)} » dans « Poursuivre le programme ».</p>`));
+    body.appendChild(el(`<p class="muted" style="margin-top:0">Sélectionne les programmes qui recevront « ${esc(progName)} » dans « Poursuivre le programme ».</p>`));
     gyms.forEach(g=>{
       const it=el(`<div class="list-item selectable">
         <div class="name grow">${esc(g.name)}</div>
@@ -1037,7 +1188,7 @@ function sendProgramModal(progName, buildItem){
     <button class="btn" data-ok>Envoyer</button></div>`);
   foot.querySelector('[data-x]').onclick=closeModal;
   foot.querySelector('[data-ok]').onclick=async()=>{
-    if(!selected.size){ toast('Sélectionne au moins une gym'); return; }
+    if(!selected.size){ toast('Sélectionne au moins un programme'); return; }
     let added=0, already=0;
     for(const gid of selected){
       const g=S.gymnasts.find(x=>x.id===gid); if(!g) continue;
@@ -1049,7 +1200,7 @@ function sendProgramModal(progName, buildItem){
       await saveGym(g); added++;
     }
     closeModal();
-    toast('Envoyé à '+added+' gym(s)'+(already?' — '+already+' déjà':''));
+    toast('Envoyé à '+added+' programme(s)'+(already?' — '+already+' déjà':''));
   };
   body.appendChild(foot);
   modal('Envoyer à…', body);
@@ -1447,15 +1598,13 @@ function buildScreen(){
   ]));
   const tabs=el(`<div class="pill-tabs">
     <button data-t="agres">Programmes par agrès</button>
-    <button data-t="complet">Programme complet</button>
     <button data-t="media">Médiathèque</button>
   </div>`);
   tabs.querySelectorAll('button').forEach(b=>{ if(b.dataset.t===tab)b.classList.add('on'); b.onclick=()=>nav('build',{tab:b.dataset.t}); });
   n.appendChild(tabs);
 
-  if(tab==='agres') n.appendChild(buildAgres());
-  else if(tab==='complet') n.appendChild(buildComplet());
-  else n.appendChild(buildMedia());
+  if(tab==='media') n.appendChild(buildMedia());
+  else n.appendChild(buildAgres());
   return n;
 }
 
@@ -1807,7 +1956,7 @@ function adminScreen(){
   const setCState=()=>{ const b=cloudCard.querySelector('.cloudstate'); if(!CLOUD_ENABLED){b.textContent="desactive (hors-ligne)";b.style.color="#6b7391";} else if(Cloud.online){b.textContent="connecte";b.style.color="#2e9e5b";} else {b.textContent="non connecte";b.style.color="#c8302f";} };
   setCState();
   cloudCard.querySelector('[data-push]').onclick=async()=>{ if(!CLOUD_ENABLED){toast("Cloud indisponible");return;} toast("Envoi en cours..."); try{ await pushAllToCloud(); setCState(); toast("Donnees envoyees au cloud"); }catch(e){ console.warn(e); toast("Echec de l envoi"); } };
-  cloudCard.querySelector('[data-pull]').onclick=async()=>{ if(!CLOUD_ENABLED){toast("Cloud indisponible");return;} toast("Chargement..."); try{ const c=await Cloud.pullEverything(); Cloud.online=true; S.gymnasts=c.gymnasts; S.programs=c.programs; S.fullPrograms=c.fullPrograms; if(c.settings)S.settings={...DEFAULT_SETTINGS,...c.settings}; S.folders=normalizeFolders(c.folders); S.media=c.media||[]; await cacheToLocal(); paintCloudBadge(); nav("admin"); toast("Recharge depuis le cloud"); }catch(e){ console.warn(e); Cloud.online=false; paintCloudBadge(); toast("Echec du chargement"); } };
+  cloudCard.querySelector('[data-pull]').onclick=async()=>{ if(!CLOUD_ENABLED){toast("Cloud indisponible");return;} toast("Chargement..."); try{ const c=await Cloud.pullEverything(); Cloud.online=true; S.gymnasts=c.gymnasts; S.programs=c.programs; S.fullPrograms=c.fullPrograms; if(c.settings)S.settings={...DEFAULT_SETTINGS,...c.settings}; S.folders=normalizeFolders(c.folders); S.gymFolders=c.gymFolders||[]; S.media=c.media||[]; await migratePasswords(); await cacheToLocal(); paintCloudBadge(); nav("admin"); toast("Recharge depuis le cloud"); }catch(e){ console.warn(e); Cloud.online=false; paintCloudBadge(); toast("Echec du chargement"); } };
   n.appendChild(cloudCard);
 
 
@@ -1815,14 +1964,15 @@ function adminScreen(){
   const pw=el(`<div class="card">
     <h2 style="margin-top:2px">Mots de passe</h2>
     <div style="max-width:360px">
-      <label class="fld">Mot de passe entraîneur</label>
-      <div class="flex"><input class="inp grow" id="tp" value="${esc(S.settings.trainerPass)}"><button class="btn sm" data-savet>OK</button></div>
+      <p class="muted" style="margin-top:0;font-size:12.5px">Les mots de passe ne sont plus stockés en clair : saisis-en un nouveau pour le changer.</p>
+      <label class="fld">Nouveau mot de passe entraîneur</label>
+      <div class="flex"><input class="inp grow" id="tp" type="password" autocomplete="new-password" placeholder="••••••••"><button class="btn sm" data-savet>OK</button></div>
       <div class="spacer"></div>
-      <label class="fld">Mot de passe administrateur</label>
-      <div class="flex"><input class="inp grow" id="ap" value="${esc(S.settings.adminPass)}"><button class="btn sm" data-savea>OK</button></div>
+      <label class="fld">Nouveau mot de passe administrateur</label>
+      <div class="flex"><input class="inp grow" id="ap" type="password" autocomplete="new-password" placeholder="••••••••"><button class="btn sm" data-savea>OK</button></div>
     </div></div>`);
-  pw.querySelector('[data-savet]').onclick=async()=>{ const v=pw.querySelector('#tp').value.trim(); if(!v)return; S.settings.trainerPass=v; await saveSettings(); toast('Enregistré'); };
-  pw.querySelector('[data-savea]').onclick=async()=>{ const v=pw.querySelector('#ap').value.trim(); if(!v)return; S.settings.adminPass=v; await saveSettings(); toast('Enregistré'); };
+  pw.querySelector('[data-savet]').onclick=async()=>{ const v=pw.querySelector('#tp').value.trim(); if(!v)return; S.settings.trainerHash=await hashPass(v); await saveSettings(); pw.querySelector('#tp').value=''; toast('Mot de passe entraîneur changé'); };
+  pw.querySelector('[data-savea]').onclick=async()=>{ const v=pw.querySelector('#ap').value.trim(); if(!v)return; S.settings.adminHash=await hashPass(v); await saveSettings(); pw.querySelector('#ap').value=''; toast('Mot de passe administrateur changé'); };
   n.appendChild(pw);
 
   // Logo
@@ -1838,8 +1988,8 @@ function adminScreen(){
   n.appendChild(lg);
 
   // Manage gyms
-  const gy=el(`<div class="card"><h2 style="margin-top:2px">Gestion des gyms</h2></div>`);
-  if(!S.gymnasts.length) gy.appendChild(el('<div class="muted">Aucune gymnaste.</div>'));
+  const gy=el(`<div class="card"><h2 style="margin-top:2px">Gestion des programmes</h2></div>`);
+  if(!S.gymnasts.length) gy.appendChild(el('<div class="muted">Aucun programme.</div>'));
   S.gymnasts.slice().sort((a,b)=>a.name.localeCompare(b.name)).forEach(g=>{
     ensureSessions(g);
     const it=el(`<div class="list-item"><div class="name">${esc(g.name)}</div>
@@ -1874,6 +2024,7 @@ const ROUTES = {
 async function boot(){
   await DB.open();
   await loadAll();
+  await migratePasswords();
   // ensure kv defaults saved
   if(!(await DB.get('kv','settings'))) await saveSettings();
   if(!(await DB.get('kv','folders'))) await saveFolders();
