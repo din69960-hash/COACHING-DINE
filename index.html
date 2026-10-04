@@ -3,6 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="referrer" content="strict-origin-when-cross-origin">
 <title>Coaching Dine — Entraînement</title>
 <style>
   :root{
@@ -60,6 +61,19 @@
 
   /* ---------- Cards / tiles ---------- */
   .tiles{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  .tiles.three{grid-template-columns:repeat(3,1fr)}
+  @media(max-width:760px){.tiles.three{grid-template-columns:1fr 1fr}}
+  /* ---------- Formation (liens YouTube) ---------- */
+  .yt-item{display:flex;gap:12px;align-items:center;padding:10px;border:1px solid var(--line);border-radius:13px;background:#fff;margin-bottom:10px}
+  .yt-thumb{width:136px;aspect-ratio:16/9;border-radius:9px;overflow:hidden;background:#12172b;position:relative;flex-shrink:0;cursor:pointer}
+  .yt-thumb img{width:100%;height:100%;object-fit:cover;display:block}
+  .yt-thumb::after{content:'▶';position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#fff;font-size:22px;background:rgba(0,0,0,.28)}
+  .yt-info{flex:1;min-width:0}
+  .yt-info .name{font-weight:700;overflow:hidden;text-overflow:ellipsis}
+  .yt-actions{display:flex;gap:6px;flex-wrap:wrap;margin-top:6px}
+  .yt-player{position:relative;width:100%;aspect-ratio:16/9;border-radius:12px;overflow:hidden;background:#000}
+  .yt-player iframe{position:absolute;inset:0;width:100%;height:100%;border:0}
+  @media(max-width:560px){ .yt-thumb{width:100px} .yt-item{gap:9px;padding:8px} }
   @media(max-width:560px){.tiles{grid-template-columns:1fr}}
   .tile{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);
     padding:22px;box-shadow:var(--shadow);text-align:left;display:flex;flex-direction:column;gap:6px}
@@ -105,6 +119,14 @@
     border-radius:13px;background:#fff;margin-bottom:10px}
   .list-item .name{font-weight:700;flex:1}
   .list-item .meta{font-size:12px;color:var(--muted)}
+  /* Mobile : les boutons passent sur une 2e ligne, pleine largeur */
+  @media(max-width:560px){
+    .list-item:has(> .btn){flex-wrap:wrap;row-gap:10px}
+    .list-item:has(> .btn)::after{content:'';order:1;flex-basis:100%;height:0}
+    .list-item > .btn{order:2;flex:1 1 0;min-width:0;padding-left:6px;padding-right:6px}
+    .list-item .meta{white-space:nowrap}
+    .list-item .name{min-width:0}
+  }
   .chip{font-size:11px;font-weight:700;padding:3px 9px;border-radius:999px;color:#fff}
 
   .empty{text-align:center;color:var(--muted);padding:34px 16px;border:1.5px dashed var(--line);border-radius:14px}
@@ -320,6 +342,7 @@ const Cloud = {
       settings:kvMap["settings"]||null,
       folders:kvMap["folders"]||null,
       gymFolders:kvMap["gymFolders"]||null,
+      formation:kvMap["formation"]||null,
     };
   },
   async upsert(store,obj){ if(!sb) return; const t=CLOUD_MAP[store]; const {error}=await sb.from(t).upsert({id:obj.id,data:obj,updated_at:new Date().toISOString()}); if(error) throw error; },
@@ -356,6 +379,7 @@ async function pushAllToCloud(){
   jobs.push(Cloud.upsertKV("settings",S.settings));
   jobs.push(Cloud.upsertKV("folders",S.folders));
   jobs.push(Cloud.upsertKV("gymFolders",S.gymFolders));
+  jobs.push(Cloud.upsertKV("formation",S.formation));
   S.media.filter(m=>m.url).forEach(m=>jobs.push(Cloud.upsertMedia(m)));
   await Promise.all(jobs);
   Cloud.online=true; paintCloudBadge();
@@ -369,6 +393,7 @@ async function cacheToLocal(){
     await DB.put("kv",{id:"settings",value:S.settings});
     await DB.put("kv",{id:"folders",value:S.folders});
     await DB.put("kv",{id:"gymFolders",value:S.gymFolders});
+    await DB.put("kv",{id:"formation",value:S.formation});
   }catch(e){ console.warn("cache local:", e); }
 }
 function normalizeFolders(arr){
@@ -390,6 +415,7 @@ const S = {
   params:{},
   gymnasts:[], programs:[], fullPrograms:[], media:[],
   gymFolders:[],             // dossiers de l'écran « Choisir votre programme »
+  formation:{folders:[],videos:[]},  // Formation : dossiers + liens YouTube
 };
 const objURLs = {};          // mediaId -> objectURL cache
 function mediaURL(id){
@@ -433,6 +459,8 @@ async function loadAll(){
   const localFolders  = kvF ? kvF.value : null;
   const kvGF = await DB.get("kv","gymFolders");
   const localGymFolders = kvGF ? kvGF.value : null;
+  const kvFo = await DB.get("kv","formation");
+  const localFormation = kvFo ? kvFo.value : null;
 
   // Tentative cloud
   let cloud=null;
@@ -460,6 +488,7 @@ async function loadAll(){
   }
 
   S.gymFolders = (cloud && cloud.gymFolders) || localGymFolders || [];
+  S.formation = normalizeFormation((cloud && cloud.formation) || localFormation);
 
   // --- Medias : metadata cloud (URL) + blobs locaux pas encore envoyes ---
   if(cloud){
@@ -475,6 +504,12 @@ async function loadAll(){
 }
 const saveSettings = async () => { await DB.put('kv',{id:'settings',value:S.settings}); cloudPushKV('settings',S.settings); };
 const saveFolders  = async () => { await DB.put('kv',{id:'folders',value:S.folders}); cloudPushKV('folders',S.folders); };
+const saveFormation = async () => { await DB.put('kv',{id:'formation',value:S.formation}); cloudPushKV('formation',S.formation); };
+function normalizeFormation(f){
+  const out={folders:Array.isArray(f&&f.folders)?f.folders:[], videos:Array.isArray(f&&f.videos)?f.videos:[]};
+  DEFAULT_FOLDERS.forEach(d=>{ if(!out.folders.some(x=>x.id===d.id)) out.folders.push({...d}); });
+  return out;
+}
 const saveGymFolders = async () => { await DB.put('kv',{id:'gymFolders',value:S.gymFolders}); cloudPushKV('gymFolders',S.gymFolders); };
 /* Migration : anciens mots de passe en clair -> hash, puis suppression du clair */
 async function migratePasswords(){
@@ -774,14 +809,17 @@ function askPass(role){
 function trainerHome(){
   const n=el('<div></div>');
   n.appendChild(header('Espace entraîneur','Que veux-tu faire ?',[{label:'Accueil'}]));
-  const tiles=el(`<div class="tiles">
+  const tiles=el(`<div class="tiles three">
     <button class="tile" data-gyms><div class="em">🤸‍♀️</div><div class="t">Choisir votre programme</div>
       <div class="d">Ouvrir un programme, lancer ou poursuivre une séance</div></button>
     <button class="tile" data-build><div class="em">🧩</div><div class="t">Construire une séance</div>
       <div class="d">Programmes par agrès, médiathèque</div></button>
+    <button class="tile" data-formation><div class="em">🎓</div><div class="t">Formation</div>
+      <div class="d">Vidéos de formation YouTube par agrès, médiathèque</div></button>
   </div>`);
   tiles.querySelector('[data-gyms]').onclick=()=>nav('gyms');
   tiles.querySelector('[data-build]').onclick=()=>nav('build');
+  tiles.querySelector('[data-formation]').onclick=()=>nav('formation');
   n.appendChild(tiles);
   return n;
 }
@@ -833,7 +871,7 @@ function gymsScreen(){
   const bar=el(`<div class="btnrow" style="margin-bottom:14px">
     ${folder?'<button class="btn line" data-back>‹ Retour</button>':''}
     <button class="btn" data-add>＋ Ajouter votre programme</button>
-    ${folder?'<button class="btn ghost" data-ren>Renommer le dossier</button>':'<button class="btn ghost" data-addf>📁 Créer un dossier</button>'}
+    ${folder?'<button class="btn line" data-ren>Renommer le dossier</button>':'<button class="btn line" data-addf>📁 Créer un dossier</button>'}
   </div>`);
   const back=bar.querySelector('[data-back]'); if(back) back.onclick=()=>nav('gyms');
   bar.querySelector('[data-add]').onclick=()=>{
@@ -1939,6 +1977,223 @@ function folderGrid(parentId){
 }
 
 /* ============================================================
+   FORMATION — vidéos YouTube rangées par dossiers (agrès + perso)
+   ============================================================ */
+const FT = {
+  byId:id=>S.formation.folders.find(f=>f.id===id)||null,
+  children:p=>S.formation.folders.filter(f=>(f.parent||null)===(p||null)),
+  chain(id){ const c=[]; let cur=FT.byId(id), g=0; while(cur && g++<50){ c.unshift(cur); cur=cur.parent?FT.byId(cur.parent):null; } return c; },
+  label(id){ return FT.chain(id).map(f=>f.name).join(' › '); },
+  desc(id){ const out=[]; const rec=p=>FT.children(p).forEach(c=>{ out.push(c.id); rec(c.id); }); rec(id); return out; },
+  sorted(){ return S.formation.folders.slice().sort((a,b)=>FT.label(a.id).localeCompare(FT.label(b.id),'fr')); },
+  countDeep(id){ const ids=[id,...FT.desc(id)]; return S.formation.videos.filter(v=>ids.includes(v.folder)).length; },
+};
+/* Extrait l'identifiant d'une vidéo YouTube depuis n'importe quel format de lien */
+function ytId(url){
+  const u=(url||'').trim();
+  if(/^[\w-]{11}$/.test(u)) return u;
+  const m=u.match(/(?:youtu\.be\/|youtube(?:-nocookie)?\.com\/(?:watch\?(?:.*&)?v=|embed\/|shorts\/|live\/|v\/))([\w-]{11})/);
+  return m?m[1]:null;
+}
+const ytThumb = id => `https://i.ytimg.com/vi/${id}/mqdefault.jpg`;
+async function ytTitle(url){
+  try{
+    const r=await fetch('https://www.youtube.com/oembed?format=json&url='+encodeURIComponent(url));
+    if(!r.ok) return null; const j=await r.json(); return j.title||null;
+  }catch(e){ return null; }
+}
+function playYouTube(v){
+  const body=el(`<div>
+    <div class="yt-player"><iframe src="https://www.youtube-nocookie.com/embed/${v.yt}?rel=0&autoplay=1&playsinline=1&origin=${encodeURIComponent(location.origin)}" referrerpolicy="strict-origin-when-cross-origin" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share; fullscreen" allowfullscreen></iframe></div>
+    <div class="btnrow" style="justify-content:flex-end;margin-top:12px">
+      <a class="btn line sm" href="https://www.youtube.com/watch?v=${v.yt}" target="_blank" rel="noopener">Ouvrir sur YouTube ↗</a>
+    </div></div>`);
+  modal(v.title, body, {wide:true});
+}
+/* Ajout / modification d'un lien */
+function videoModal(v, folderId, onDone){
+  const isNew=!v;
+  const body=el(`<div>
+    <label class="fld">Lien YouTube</label>
+    <input class="inp" data-url placeholder="https://youtu.be/…" value="${esc(v?v.url:'')}">
+    <div class="spacer"></div>
+    <label class="fld">Titre ${isNew?'<span style="font-weight:500">(laisser vide = titre YouTube)</span>':''}</label>
+    <input class="inp" data-title placeholder="ex. Courbe : les bases" value="${esc(v?v.title:'')}">
+    <div class="spacer"></div>
+    <div class="btnrow" style="justify-content:flex-end">
+      <button class="btn ghost" data-x>Annuler</button>
+      <button class="btn" data-ok>${isNew?'Ajouter':'Enregistrer'}</button></div></div>`);
+  body.querySelector('[data-x]').onclick=closeModal;
+  body.querySelector('[data-ok]').onclick=async()=>{
+    const url=body.querySelector('[data-url]').value.trim();
+    const id=ytId(url);
+    if(!id){ toast('Lien YouTube non reconnu'); return; }
+    let title=body.querySelector('[data-title]').value.trim();
+    if(!title){ toast('Récupération du titre…'); title=(await ytTitle(url))||'Vidéo YouTube'; }
+    if(isNew){
+      const order=Math.max(-1,...S.formation.videos.filter(x=>x.folder===folderId).map(x=>x.order??0))+1;
+      S.formation.videos.push({id:uid(),folder:folderId,title,url,yt:id,order,createdAt:Date.now()});
+    } else { v.url=url; v.yt=id; v.title=title; }
+    await saveFormation(); closeModal(); toast(isNew?'Vidéo ajoutée':'Vidéo modifiée'); onDone();
+  };
+  modal(isNew?'Ajouter une vidéo YouTube':'Modifier la vidéo', body);
+  setTimeout(()=>body.querySelector('[data-url]').focus(),50);
+}
+/* Grille de dossiers de formation */
+function formationFolderGrid(parentId, open, afterDelete){
+  const grid=el('<div class="tiles"></div>');
+  const children=FT.children(parentId);
+  if(!children.length){ grid.appendChild(el('<div class="muted" style="grid-column:1/-1">Aucun dossier.</div>')); return grid; }
+  children.forEach(f=>{
+    const nbV=FT.countDeep(f.id), nbS=FT.children(f.id).length, removable=!isDefaultFolder(f.id);
+    const t=el(`<button class="tile" style="align-items:flex-start">
+      <div class="em">📁</div><div class="t">${esc(f.name)}</div>
+      <div class="d">${nbV} vidéo(s)${nbS?` · ${nbS} sous-dossier(s)`:''}</div>
+      ${removable?`<span class="flex" style="margin-top:8px;gap:6px">
+        <span class="btn sm ghost" data-ren>Renommer</span><span class="btn sm danger" data-delf>Supprimer</span></span>`:''}
+    </button>`);
+    t.onclick=e=>{ if(e.target.closest('[data-delf],[data-ren]')) return; open(f.id); };
+    const ren=t.querySelector('[data-ren]');
+    if(ren) ren.onclick=e=>{ e.stopPropagation(); promptModal('Renommer le dossier','Nom',{value:f.name,okText:'Renommer',onOk:async v=>{ f.name=v; await saveFormation(); closeModal(); afterDelete(); }}); };
+    const df=t.querySelector('[data-delf]');
+    if(df) df.onclick=e=>{ e.stopPropagation(); confirmModal('Supprimer le dossier',`Supprimer « ${f.name} », ses sous-dossiers et leurs liens ? (Les vidéos restent sur YouTube.)`,async()=>{
+      const ids=[f.id,...FT.desc(f.id)];
+      S.formation.videos=S.formation.videos.filter(v=>!ids.includes(v.folder));
+      S.formation.folders=S.formation.folders.filter(x=>!ids.includes(x.id));
+      await saveFormation(); afterDelete();
+    }); };
+    grid.appendChild(t);
+  });
+  return grid;
+}
+/* Contenu d'un dossier : sous-dossiers + vidéos (réordonnables) */
+function formationFolderView(folderId, go, rootId){
+  const n=el('<div></div>');
+  const folder=FT.byId(folderId);
+  if(!folder){ n.appendChild(el('<div class="empty">Dossier introuvable.</div>')); return n; }
+  const here=()=>go(folderId);
+
+  // fil d'Ariane (à partir de la racine du contexte)
+  let chain=FT.chain(folderId);
+  if(rootId){ const i=chain.findIndex(f=>f.id===rootId); if(i>0) chain=chain.slice(i); }
+  const crumb=el('<div class="crumbs" style="margin-bottom:12px"></div>');
+  const rootB=el(`<b style="cursor:pointer">${rootId?'Agrès':'Dossiers'}</b>`); rootB.onclick=()=>go(null); crumb.appendChild(rootB);
+  chain.forEach((f,i)=>{
+    crumb.appendChild(el('<span>›</span>'));
+    if(i<chain.length-1){ const b=el(`<b style="cursor:pointer">${esc(f.name)}</b>`); b.onclick=()=>go(f.id); crumb.appendChild(b); }
+    else crumb.appendChild(el(`<span>${esc(f.name)}</span>`));
+  });
+  n.appendChild(crumb);
+
+  const atRoot = rootId ? folderId===rootId : !folder.parent;
+  const bar=el(`<div class="btnrow" style="margin-bottom:12px">
+    <button class="btn line" data-back>‹ Retour</button>
+    <button class="btn" data-addv>＋ Ajouter une vidéo YouTube</button>
+    <button class="btn line" data-addsub>＋ Sous-dossier</button></div>`);
+  bar.querySelector('[data-back]').onclick=()=>go(atRoot?null:folder.parent);
+  bar.querySelector('[data-addv]').onclick=()=>videoModal(null,folderId,here);
+  bar.querySelector('[data-addsub]').onclick=()=>promptModal('Nouveau sous-dossier','Nom du sous-dossier',{placeholder:'ex. Éléments en arrière',okText:'Créer',onOk:async name=>{
+    S.formation.folders.push({id:uid(),name:name.trim(),parent:folderId}); await saveFormation(); closeModal(); here();
+  }});
+  n.appendChild(bar);
+  n.appendChild(el(`<h2 style="margin-top:4px">📁 ${esc(folder.name)}</h2>`));
+
+  if(FT.children(folderId).length){
+    n.appendChild(el('<div class="muted" style="font-size:12.5px;margin:2px 0 6px">Sous-dossiers</div>'));
+    n.appendChild(formationFolderGrid(folderId, go, here));
+    n.appendChild(el('<div class="spacer"></div>'));
+  }
+
+  const vids=S.formation.videos.filter(v=>v.folder===folderId).sort((a,b)=>(a.order??0)-(b.order??0));
+  if(!vids.length){
+    n.appendChild(el('<div class="empty">Aucune vidéo ici.<br>Ajoute un lien YouTube avec le bouton ci-dessus.</div>'));
+    return n;
+  }
+  n.appendChild(el('<p class="muted" style="margin:6px 0 10px;font-size:12.5px">Touche la miniature pour regarder. Glisse la poignée ⠿ pour changer l’ordre.</p>'));
+  const list=el('<div class="yt-list"></div>');
+  vids.forEach(v=>{
+    const it=el(`<div class="yt-item sort-item">
+      <span class="drag-handle" data-drag-handle title="Glisser pour déplacer">⠿</span>
+      <div class="yt-thumb" data-play><img loading="lazy" src="${ytThumb(v.yt)}" alt=""></div>
+      <div class="yt-info">
+        <div class="name">${esc(v.title)}</div>
+        <div class="yt-actions">
+          <button class="btn sm ghost" data-edit>Modifier</button>
+          <button class="btn sm ghost" data-move>Déplacer</button>
+          <button class="btn sm danger" data-del>Suppr.</button>
+        </div></div></div>`);
+    it.querySelector('[data-play]').onclick=()=>playYouTube(v);
+    it.querySelector('[data-edit]').onclick=()=>videoModal(v,folderId,here);
+    it.querySelector('[data-del]').onclick=()=>confirmModal('Supprimer',`Retirer « ${v.title} » ? (La vidéo reste sur YouTube.)`,async()=>{
+      S.formation.videos=S.formation.videos.filter(x=>x.id!==v.id); await saveFormation(); here();
+    });
+    it.querySelector('[data-move]').onclick=()=>{
+      const b=el(`<div><label class="fld">Déplacer vers</label>
+        <select class="inp">${FT.sorted().map(f=>`<option value="${f.id}" ${f.id===v.folder?'selected':''}>${esc(FT.label(f.id))}</option>`).join('')}</select>
+        <div class="spacer"></div><div class="btnrow" style="justify-content:flex-end">
+        <button class="btn ghost" data-x>Annuler</button><button class="btn" data-ok>Déplacer</button></div></div>`);
+      b.querySelector('[data-x]').onclick=closeModal;
+      b.querySelector('[data-ok]').onclick=async()=>{
+        const to=b.querySelector('select').value;
+        if(to!==v.folder){ v.folder=to; v.order=Math.max(-1,...S.formation.videos.filter(x=>x.folder===to&&x!==v).map(x=>x.order??0))+1; await saveFormation(); toast('Vidéo déplacée'); }
+        closeModal(); here();
+      };
+      modal('Déplacer la vidéo',b);
+    };
+    list.appendChild(it);
+  });
+  n.appendChild(list);
+  makeSortable(list,'.yt-item',(from,to)=>{
+    arrayMove(vids,from,to); vids.forEach((v,i)=>v.order=i); saveFormation(); here();
+  });
+  return n;
+}
+function formationScreen(){
+  const n=el('<div></div>');
+  const tab=S.params.tab||'agres';
+  n.appendChild(header('Formation',null,[
+    {label:'Accueil',to:()=>{S.role=null;nav('home');}},
+    {label:'Entraîneur',to:()=>nav('trainerHome')},
+    {label:'Formation'}
+  ]));
+  const tabs=el(`<div class="pill-tabs">
+    <button data-t="agres">Formation par agrès</button>
+    <button data-t="media">Médiathèque</button></div>`);
+  tabs.querySelectorAll('button').forEach(b=>{ if(b.dataset.t===tab) b.classList.add('on'); b.onclick=()=>nav('formation',{tab:b.dataset.t}); });
+  n.appendChild(tabs);
+
+  if(tab==='agres'){
+    const app=S.params.app;
+    if(!app){
+      n.appendChild(el('<p class="muted" style="margin-top:-4px">Choisis un agrès pour voir ses vidéos de formation.</p>'));
+      const t=el('<div class="apparatus-tabs"></div>');
+      APPARATUS.forEach(a=>{
+        const b=el(`<button class="atab ${a.cls}">${a.label}<small>${FT.countDeep(a.key)} vidéo(s)</small></button>`);
+        b.onclick=()=>nav('formation',{tab:'agres',app:a.key});
+        t.appendChild(b);
+      });
+      n.appendChild(t);
+      return n;
+    }
+    const go=id=> id ? nav('formation',{tab:'agres',app,folder:id}) : nav('formation',{tab:'agres'});
+    n.appendChild(formationFolderView(S.params.folder||app, go, app));
+    return n;
+  }
+
+  // Médiathèque de formation
+  const go=id=> id ? nav('formation',{tab:'media',folder:id}) : nav('formation',{tab:'media'});
+  if(S.params.folder){ n.appendChild(formationFolderView(S.params.folder, go, null)); return n; }
+  n.appendChild(el('<p class="muted" style="margin-top:-4px">Range tes vidéos YouTube de formation par dossier et sous-dossier.</p>'));
+  const bar=el(`<div class="btnrow" style="margin-bottom:14px"><button class="btn" data-addf>＋ Ajouter un dossier</button></div>`);
+  bar.querySelector('[data-addf]').onclick=()=>promptModal('Nouveau dossier','Nom du dossier',{placeholder:'ex. Préparation physique',okText:'Créer',onOk:async name=>{
+    S.formation.folders.push({id:uid(),name:name.trim(),parent:null}); await saveFormation(); closeModal(); go(null);
+  }});
+  n.appendChild(bar);
+  n.appendChild(formationFolderGrid(null, go, ()=>go(null)));
+  return n;
+}
+
+/* ============================================================
    ADMIN
    ============================================================ */
 function adminScreen(){
@@ -1956,7 +2211,7 @@ function adminScreen(){
   const setCState=()=>{ const b=cloudCard.querySelector('.cloudstate'); if(!CLOUD_ENABLED){b.textContent="desactive (hors-ligne)";b.style.color="#6b7391";} else if(Cloud.online){b.textContent="connecte";b.style.color="#2e9e5b";} else {b.textContent="non connecte";b.style.color="#c8302f";} };
   setCState();
   cloudCard.querySelector('[data-push]').onclick=async()=>{ if(!CLOUD_ENABLED){toast("Cloud indisponible");return;} toast("Envoi en cours..."); try{ await pushAllToCloud(); setCState(); toast("Donnees envoyees au cloud"); }catch(e){ console.warn(e); toast("Echec de l envoi"); } };
-  cloudCard.querySelector('[data-pull]').onclick=async()=>{ if(!CLOUD_ENABLED){toast("Cloud indisponible");return;} toast("Chargement..."); try{ const c=await Cloud.pullEverything(); Cloud.online=true; S.gymnasts=c.gymnasts; S.programs=c.programs; S.fullPrograms=c.fullPrograms; if(c.settings)S.settings={...DEFAULT_SETTINGS,...c.settings}; S.folders=normalizeFolders(c.folders); S.gymFolders=c.gymFolders||[]; S.media=c.media||[]; await migratePasswords(); await cacheToLocal(); paintCloudBadge(); nav("admin"); toast("Recharge depuis le cloud"); }catch(e){ console.warn(e); Cloud.online=false; paintCloudBadge(); toast("Echec du chargement"); } };
+  cloudCard.querySelector('[data-pull]').onclick=async()=>{ if(!CLOUD_ENABLED){toast("Cloud indisponible");return;} toast("Chargement..."); try{ const c=await Cloud.pullEverything(); Cloud.online=true; S.gymnasts=c.gymnasts; S.programs=c.programs; S.fullPrograms=c.fullPrograms; if(c.settings)S.settings={...DEFAULT_SETTINGS,...c.settings}; S.folders=normalizeFolders(c.folders); S.gymFolders=c.gymFolders||[]; S.formation=normalizeFormation(c.formation); S.media=c.media||[]; await migratePasswords(); await cacheToLocal(); paintCloudBadge(); nav("admin"); toast("Recharge depuis le cloud"); }catch(e){ console.warn(e); Cloud.online=false; paintCloudBadge(); toast("Echec du chargement"); } };
   n.appendChild(cloudCard);
 
 
@@ -2015,7 +2270,7 @@ function adminScreen(){
    ROUTES
    ============================================================ */
 const ROUTES = {
-  trainerHome, gyms:gymsScreen, gymProfile, build:buildScreen, admin:adminScreen
+  trainerHome, gyms:gymsScreen, gymProfile, build:buildScreen, formation:formationScreen, admin:adminScreen
 };
 
 /* ============================================================
