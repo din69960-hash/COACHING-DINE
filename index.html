@@ -2327,6 +2327,7 @@ const PR_DAYS_S=['Dim','Lun','Mar','Mer','Jeu','Ven','Sam'];
 const PR_DAY_ORDER=[1,2,3,4,5,6,0];
 const PR_MONTHS=['Janvier','Février','Mars','Avril','Mai','Juin','Juillet','Août','Septembre','Octobre','Novembre','Décembre'];
 const pad2=n=>String(n).padStart(2,'0');
+let prKeepX=null; // position horizontale du tableau à conserver après un clic
 const prKeyDate=d=>`${d.getFullYear()}-${pad2(d.getMonth()+1)}-${pad2(d.getDate())}`;
 const prTodayKey=()=>prKeyDate(new Date());
 function prSeasonStart(g){ return parseInt(String(g.season||'').slice(0,4),10) || new Date().getFullYear(); }
@@ -2504,7 +2505,7 @@ function presenceGroupScreen(g){
   let mi=S.params.month;
   if(mi==null){ const t=new Date(); mi=months.findIndex(x=>x.y===t.getFullYear()&&x.m===t.getMonth()); if(mi<0) mi=0; }
   const {y,m}=months[mi];
-  const go=(p)=>{ const sy=window.scrollY; nav('presence',{group:g.id,month:mi,bilan:S.params.bilan,...p}); window.scrollTo(0,sy); };
+  const go=(p,keepX)=>{ const t=document.querySelector('.pr-tbl'); prKeepX=(keepX&&t)?t.scrollLeft:null; const sy=window.scrollY; nav('presence',{group:g.id,month:mi,bilan:S.params.bilan,...p}); window.scrollTo(0,sy); };
 
   const bar=el(`<div class="btnrow" style="align-items:center;margin-bottom:12px">
     <button class="btn sm line" data-prev ${mi===0?'disabled style="opacity:.4"':''}>‹</button>
@@ -2552,9 +2553,15 @@ function presenceGroupScreen(g){
       const p=g.presence[s.key]||(g.presence[s.key]={});
       if(p[gid]) delete p[gid]; else p[gid]=true;
       if(!Object.keys(p).length) delete g.presence[s.key];
-      await saveAttendance(); go({});
+      await saveAttendance(); go({},true);
     });
-    tbl.querySelectorAll('th.pr-col').forEach(th=>th.onclick=()=>presenceSessionMenu(g,sessions[Number(th.dataset.col)],()=>go({})));
+    tbl.querySelectorAll('th.pr-col').forEach(th=>th.onclick=()=>presenceSessionMenu(g,sessions[Number(th.dataset.col)],()=>go({},true)));
+    /* Garde la position après un clic ; sinon, centre sur la date du jour */
+    requestAnimationFrame(()=>{
+      if(prKeepX!=null){ wrap.scrollLeft=prKeepX; prKeepX=null; return; }
+      const th=tbl.querySelector('thead th.pr-today'); const nm=tbl.querySelector('thead th.pr-name');
+      if(th) wrap.scrollLeft=Math.max(0, th.offsetLeft-(nm?nm.offsetWidth:0)-(wrap.clientWidth-(nm?nm.offsetWidth:0))/2+th.offsetWidth/2);
+    });
   }
   n.appendChild(card);
 
