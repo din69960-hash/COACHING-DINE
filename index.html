@@ -71,6 +71,30 @@
   /* ---------- Cards / tiles ---------- */
   .tiles{display:grid;grid-template-columns:1fr 1fr;gap:14px}
   .tiles.three{grid-template-columns:repeat(3,1fr)}
+  .tiles.four{grid-template-columns:repeat(4,1fr)}
+  @media(max-width:960px){.tiles.four{grid-template-columns:1fr 1fr}}
+  /* ---------- Suivi de présence ---------- */
+  .pr-tbl{overflow-x:auto;-webkit-overflow-scrolling:touch}
+  .pr-tbl table{border-collapse:separate;border-spacing:0;font-size:13px;min-width:100%}
+  .pr-tbl th,.pr-tbl td{border-bottom:1px solid var(--line);padding:4px;text-align:center;white-space:nowrap}
+  .pr-tbl th.pr-name{position:sticky;left:0;z-index:2;background:var(--panel);text-align:left;padding:6px 10px 6px 4px;
+    max-width:130px;overflow:hidden;text-overflow:ellipsis;font-weight:700;border-right:1px solid var(--line)}
+  .pr-tbl thead th{font-weight:500;color:var(--muted);font-size:11px;line-height:1.2}
+  .pr-tbl thead th b{display:block;color:var(--ink);font-size:15px}
+  .pr-tbl thead th small{display:block;font-size:10px}
+  .pr-tbl th.pr-col{cursor:pointer;min-width:42px}
+  .pr-tbl .pr-today{background:#fff8e6}
+  .pr-tbl .pr-cancel{background:repeating-linear-gradient(45deg,#f3f4f8,#f3f4f8 5px,#e9ebf2 5px,#e9ebf2 10px);color:#a0a6bd}
+  .pr-ck{width:34px;height:34px;border-radius:9px;border:2px solid var(--line);background:#fff;font-weight:900;font-size:17px;color:#fff}
+  .pr-ck.on{background:var(--ok);border-color:var(--ok)}
+  .pr-total td,.pr-total th{font-size:11.5px;color:var(--muted);font-weight:700;border-bottom:0}
+  .pr-stats{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+  @media(max-width:620px){.pr-stats{grid-template-columns:1fr}}
+  .pr-stat{display:flex;gap:14px;align-items:center;background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:12px 14px}
+  .pr-ring{width:64px;height:64px;border-radius:50%;display:grid;place-items:center;flex:none}
+  .pr-ring span{width:48px;height:48px;border-radius:50%;background:var(--panel);display:grid;place-items:center;font-weight:900;font-size:14px;color:var(--ink)}
+  .pr-bar{height:7px;background:#e6eaf3;border-radius:9px;overflow:hidden;margin:6px 0 5px}
+  .pr-bar i{display:block;height:100%;border-radius:9px}
   @media(max-width:760px){.tiles.three{grid-template-columns:1fr 1fr}}
   /* ---------- Formation (liens YouTube) ---------- */
   .yt-item{display:flex;gap:12px;align-items:center;padding:10px;border:1px solid var(--line);border-radius:13px;background:#fff;margin-bottom:10px}
@@ -352,6 +376,7 @@ const Cloud = {
       folders:kvMap["folders"]||null,
       gymFolders:kvMap["gymFolders"]||null,
       formation:kvMap["formation"]||null,
+      attendance:kvMap["attendance"]||null,
     };
   },
   async upsert(store,obj){ if(!sb) return; const t=CLOUD_MAP[store]; const {error}=await sb.from(t).upsert({id:obj.id,data:obj,updated_at:new Date().toISOString()}); if(error) throw error; },
@@ -389,6 +414,7 @@ async function pushAllToCloud(){
   jobs.push(Cloud.upsertKV("folders",S.folders));
   jobs.push(Cloud.upsertKV("gymFolders",S.gymFolders));
   jobs.push(Cloud.upsertKV("formation",S.formation));
+  jobs.push(Cloud.upsertKV("attendance",S.attendance));
   S.media.filter(m=>m.url).forEach(m=>jobs.push(Cloud.upsertMedia(m)));
   await Promise.all(jobs);
   Cloud.online=true; paintCloudBadge();
@@ -403,6 +429,7 @@ async function cacheToLocal(){
     await DB.put("kv",{id:"folders",value:S.folders});
     await DB.put("kv",{id:"gymFolders",value:S.gymFolders});
     await DB.put("kv",{id:"formation",value:S.formation});
+    await DB.put("kv",{id:"attendance",value:S.attendance});
   }catch(e){ console.warn("cache local:", e); }
 }
 function normalizeFolders(arr){
@@ -425,6 +452,7 @@ const S = {
   gymnasts:[], programs:[], fullPrograms:[], media:[],
   gymFolders:[],             // dossiers de l'écran « Choisir votre programme »
   formation:{folders:[],videos:[]},  // Formation : dossiers + liens YouTube
+  attendance:{groups:[]},    // Suivi de présence
 };
 const objURLs = {};          // mediaId -> objectURL cache
 function mediaURL(id){
@@ -470,6 +498,8 @@ async function loadAll(){
   const localGymFolders = kvGF ? kvGF.value : null;
   const kvFo = await DB.get("kv","formation");
   const localFormation = kvFo ? kvFo.value : null;
+  const kvAt = await DB.get("kv","attendance");
+  const localAttendance = kvAt ? kvAt.value : null;
 
   // Tentative cloud
   let cloud=null;
@@ -498,6 +528,8 @@ async function loadAll(){
 
   S.gymFolders = (cloud && cloud.gymFolders) || localGymFolders || [];
   S.formation = normalizeFormation((cloud && cloud.formation) || localFormation);
+  S.attendance = normalizeAttendance((cloud && cloud.attendance) || localAttendance);
+  if(cloud){ try{ await DB.put("kv",{id:"attendance",value:S.attendance}); }catch(e){} }
 
   // --- Medias : metadata cloud (URL) + blobs locaux pas encore envoyes ---
   if(cloud){
@@ -818,17 +850,20 @@ function askPass(role){
 function trainerHome(){
   const n=el('<div></div>');
   n.appendChild(header('Espace entraîneur','Que veux-tu faire ?',[{label:'Accueil'}]));
-  const tiles=el(`<div class="tiles three">
+  const tiles=el(`<div class="tiles four">
     <button class="tile" data-gyms><div class="em">🤸‍♀️</div><div class="t">Choisir votre programme</div>
       <div class="d">Ouvrir un programme, lancer ou poursuivre une séance</div></button>
     <button class="tile" data-build><div class="em">🧩</div><div class="t">Construire une séance</div>
       <div class="d">Programmes par agrès, médiathèque</div></button>
     <button class="tile" data-formation><div class="em">🎓</div><div class="t">Formation</div>
       <div class="d">Vidéos de formation YouTube par agrès, médiathèque</div></button>
+    <button class="tile" data-presence><div class="em">✅</div><div class="t">Suivi de présence</div>
+      <div class="d">Groupes, appel à chaque entraînement, bilan par gym</div></button>
   </div>`);
   tiles.querySelector('[data-gyms]').onclick=()=>nav('gyms');
   tiles.querySelector('[data-build]').onclick=()=>nav('build');
   tiles.querySelector('[data-formation]').onclick=()=>nav('formation');
+  tiles.querySelector('[data-presence]').onclick=()=>nav('presence');
   n.appendChild(tiles);
   return n;
 }
@@ -2276,10 +2311,302 @@ function adminScreen(){
 }
 
 /* ============================================================
+   SUIVI DE PRÉSENCE
+   S.attendance = { groups:[ {id,name,season,gyms:[{id,name}],
+     slots:[{id,day(0=dim..6=sam),start,end}], cancelled:{key:true},
+     presence:{ "YYYY-MM-DD|slotId": {gymId:true} } } ] }
+   ============================================================ */
+const saveAttendance = async () => { await DB.put('kv',{id:'attendance',value:S.attendance}); cloudPushKV('attendance',S.attendance); };
+function normalizeAttendance(a){
+  const out={groups:Array.isArray(a&&a.groups)?a.groups:[]};
+  out.groups.forEach(g=>{ g.gyms=g.gyms||[]; g.slots=g.slots||[]; g.cancelled=g.cancelled||{}; g.presence=g.presence||{}; });
+  return out;
+}
+const PR_DAYS=['Dimanche','Lundi','Mardi','Mercredi','Jeudi','Vendredi','Samedi'];
+const PR_DAYS_S=['Dim','Lun','Mar','Mer','Jeu','Ven','Sam'];
+const PR_DAY_ORDER=[1,2,3,4,5,6,0];
+const PR_MONTHS=['Janvier','Février','Mars','Avril','Mai','Juin','Juillet','Août','Septembre','Octobre','Novembre','Décembre'];
+const pad2=n=>String(n).padStart(2,'0');
+const prKeyDate=d=>`${d.getFullYear()}-${pad2(d.getMonth()+1)}-${pad2(d.getDate())}`;
+const prTodayKey=()=>prKeyDate(new Date());
+function prSeasonStart(g){ return parseInt(String(g.season||'').slice(0,4),10) || new Date().getFullYear(); }
+function prSeasonMonths(g){ const y=prSeasonStart(g); return Array.from({length:12},(_,i)=>({y: i<4?y:y+1, m:(8+i)%12})); }
+function prSeasonOptions(){
+  const now=new Date(); const y0=now.getMonth()>=7?now.getFullYear():now.getFullYear()-1;
+  return [y0-1,y0,y0+1,y0+2].map(y=>`${y}/${y+1}`);
+}
+function prSlotMinutes(s){
+  const t=x=>{ const [h,m]=String(x||'0:0').split(':').map(Number); return (h||0)*60+(m||0); };
+  return Math.max(0,t(s.end)-t(s.start));
+}
+function prSortSlots(slots){ return slots.slice().sort((a,b)=>(PR_DAY_ORDER.indexOf(a.day)-PR_DAY_ORDER.indexOf(b.day)) || String(a.start).localeCompare(String(b.start))); }
+/* Toutes les séances (colonnes) d'un mois */
+function prMonthSessions(g,y,m){
+  const out=[]; const days=new Date(y,m+1,0).getDate();
+  for(let d=1; d<=days; d++){
+    const dt=new Date(y,m,d); const dk=prKeyDate(dt);
+    prSortSlots(g.slots).filter(s=>s.day===dt.getDay()).forEach(s=>out.push({date:dt,dk,slot:s,key:dk+'|'+s.id}));
+  }
+  return out;
+}
+function prSeasonSessions(g){ return prSeasonMonths(g).flatMap(({y,m})=>prMonthSessions(g,y,m)); }
+/* Une séance compte dans le bilan si elle n'est pas annulée et qu'au moins une présence est cochée */
+function prCounted(g,s){ if(g.cancelled[s.key]) return false; const p=g.presence[s.key]; return !!p && Object.values(p).some(Boolean); }
+function prStats(g,sessions){
+  const done=sessions.filter(s=>prCounted(g,s));
+  return g.gyms.map(gym=>{
+    const pres=done.filter(s=>g.presence[s.key][gym.id]);
+    const mins=pres.reduce((a,s)=>a+prSlotMinutes(s.slot),0);
+    return {gym, total:done.length, present:pres.length, pct: done.length?Math.round(pres.length*100/done.length):0, mins};
+  });
+}
+const prHours=mins=>{ const h=Math.floor(mins/60), m=mins%60; return m?`${h} h ${pad2(m)}`:`${h} h`; };
+const prColor=p=> p>=90?'#22a06b':p>=75?'#2fb89e':p>=60?'#e8a33d':'#e0568b';
+
+/* ---------- Écran liste des groupes ---------- */
+function presenceScreen(){
+  if(S.params.group){ const g=S.attendance.groups.find(x=>x.id===S.params.group); if(g) return presenceGroupScreen(g); }
+  const n=el('<div></div>');
+  n.appendChild(header('Suivi de présence','Tes groupes, leurs entraînements et les présences',[
+    {label:'Accueil',to:()=>{S.role=null;nav('home');}},
+    {label:'Entraîneur',to:()=>nav('trainerHome')},
+    {label:'Suivi de présence'}
+  ]));
+  const add=el('<button class="btn" style="margin-bottom:16px">＋ Créer votre groupe</button>');
+  add.onclick=()=>presenceGroupForm(null);
+  n.appendChild(add);
+  if(!S.attendance.groups.length){
+    n.appendChild(el('<div class="empty">Aucun groupe pour l\'instant.<br>Clique sur « Créer votre groupe » pour commencer.</div>'));
+    return n;
+  }
+  S.attendance.groups.slice().sort((a,b)=>String(a.name).localeCompare(String(b.name),'fr')).forEach(g=>{
+    const days=prSortSlots(g.slots).map(s=>PR_DAYS_S[s.day]).filter((v,i,a)=>a.indexOf(v)===i).join(', ');
+    const it=el(`<div class="list-item" style="cursor:pointer">
+      <div class="em" style="font-size:24px">👥</div>
+      <div style="flex:1;min-width:0"><div class="name">${esc(g.name)}</div>
+        <div class="meta">Saison ${esc(g.season)} · ${g.gyms.length} gym(s) · ${esc(days||'aucun jour')}</div></div>
+      <button class="btn sm line" data-edit>Modifier</button>
+      <button class="btn sm danger" data-del>Supprimer</button></div>`);
+    it.onclick=e=>{ if(e.target.closest('button')) return; nav('presence',{group:g.id}); };
+    it.querySelector('[data-edit]').onclick=()=>presenceGroupForm(g);
+    it.querySelector('[data-del]').onclick=()=>confirmModal('Supprimer le groupe',`Supprimer « ${g.name} » et toutes ses présences ?`,async()=>{
+      S.attendance.groups=S.attendance.groups.filter(x=>x.id!==g.id); await saveAttendance(); toast('Groupe supprimé'); nav('presence');
+    });
+    n.appendChild(it);
+  });
+  return n;
+}
+
+/* ---------- Formulaire création / modification ---------- */
+function presenceGroupForm(existing){
+  const g = existing ? JSON.parse(JSON.stringify(existing)) : {id:uid(),name:'',season:prSeasonOptions()[1],gyms:[],slots:[],cancelled:{},presence:{}};
+  const body=el(`<div>
+    <label class="fld">1. Nom du groupe</label>
+    <input class="inp" data-name placeholder="ex : Équipe Fédérale A" value="${esc(g.name)}">
+    <div class="spacer"></div><div class="spacer"></div>
+    <label class="fld">2. Gymnastes</label>
+    <div data-gyms></div>
+    <div style="display:flex;gap:8px;margin-top:6px">
+      <input class="inp" data-newgym placeholder="Prénom de la gym">
+      <button class="btn sm" data-addgym>Ajouter</button>
+    </div>
+    <div class="spacer"></div><div class="spacer"></div>
+    <label class="fld">3. Saison</label>
+    <select class="inp" data-season>${prSeasonOptions().map(s=>`<option ${s===g.season?'selected':''}>${s}</option>`).join('')}</select>
+    <div class="spacer"></div><div class="spacer"></div>
+    <label class="fld">4. Jours et horaires d'entraînement</label>
+    <div data-slots></div>
+    <button class="btn sm ghost" data-addslot style="margin-top:6px">＋ Ajouter un entraînement</button>
+    <div class="spacer"></div><div class="spacer"></div>
+    <div class="btnrow" style="justify-content:flex-end">
+      <button class="btn ghost" data-x>Annuler</button>
+      <button class="btn" data-ok>Enregistrer</button>
+    </div></div>`);
+  const gymsBox=body.querySelector('[data-gyms]'), slotsBox=body.querySelector('[data-slots]');
+  const paintGyms=()=>{
+    gymsBox.innerHTML='';
+    if(!g.gyms.length) gymsBox.appendChild(el('<div class="meta" style="color:var(--muted);font-size:13px">Aucune gym ajoutée.</div>'));
+    g.gyms.forEach((gym,i)=>{
+      const r=el(`<div style="display:flex;gap:6px;margin-bottom:6px;align-items:center">
+        <input class="inp" value="${esc(gym.name)}" style="padding:8px 10px">
+        <button class="btn sm ghost" data-up title="Monter">↑</button>
+        <button class="btn sm danger" data-rm>✕</button></div>`);
+      r.querySelector('input').oninput=e=>{ gym.name=e.target.value; };
+      r.querySelector('[data-up]').onclick=()=>{ if(i>0){ g.gyms.splice(i-1,0,g.gyms.splice(i,1)[0]); paintGyms(); } };
+      r.querySelector('[data-rm]').onclick=()=>{ g.gyms.splice(i,1); paintGyms(); };
+      gymsBox.appendChild(r);
+    });
+  };
+  const addGym=()=>{
+    const inp=body.querySelector('[data-newgym]');
+    inp.value.split(/[,;\n]/).map(s=>s.trim()).filter(Boolean).forEach(name=>g.gyms.push({id:uid(),name}));
+    inp.value=''; paintGyms(); inp.focus();
+  };
+  body.querySelector('[data-addgym]').onclick=addGym;
+  body.querySelector('[data-newgym]').addEventListener('keydown',e=>{ if(e.key==='Enter'){ e.preventDefault(); addGym(); } });
+  const paintSlots=()=>{
+    slotsBox.innerHTML='';
+    if(!g.slots.length) slotsBox.appendChild(el('<div class="meta" style="color:var(--muted);font-size:13px">Aucun entraînement.</div>'));
+    g.slots.forEach((s,i)=>{
+      const r=el(`<div style="border:1px solid var(--line);border-radius:12px;padding:8px;margin-bottom:8px;background:#f8f9fc">
+        <div style="display:flex;gap:6px;align-items:center">
+          <select class="inp" data-day style="flex:1;padding:8px;font-weight:700">${PR_DAY_ORDER.map(d=>`<option value="${d}" ${d===s.day?'selected':''}>${PR_DAYS[d]}</option>`).join('')}</select>
+          <button class="btn sm danger" data-rm>✕</button></div>
+        <div style="display:flex;gap:6px;align-items:center;margin-top:6px">
+          <span style="font-size:13px;color:var(--muted)">de</span>
+          <input class="inp" type="time" data-start value="${esc(s.start)}" style="flex:1;min-width:0;padding:8px">
+          <span style="font-size:13px;color:var(--muted)">à</span>
+          <input class="inp" type="time" data-end value="${esc(s.end)}" style="flex:1;min-width:0;padding:8px"></div></div>`);
+      r.querySelector('[data-day]').onchange=e=>{ s.day=Number(e.target.value); };
+      r.querySelector('[data-start]').onchange=e=>{ s.start=e.target.value; };
+      r.querySelector('[data-end]').onchange=e=>{ s.end=e.target.value; };
+      r.querySelector('[data-rm]').onclick=()=>{ g.slots.splice(i,1); paintSlots(); };
+      slotsBox.appendChild(r);
+    });
+  };
+  body.querySelector('[data-addslot]').onclick=()=>{
+    const last=g.slots[g.slots.length-1];
+    g.slots.push({id:uid(),day:last?PR_DAY_ORDER[(PR_DAY_ORDER.indexOf(last.day)+1)%7]:1,start:last?last.start:'18:00',end:last?last.end:'20:00'});
+    paintSlots();
+  };
+  paintGyms(); paintSlots();
+  body.querySelector('[data-x]').onclick=closeModal;
+  body.querySelector('[data-ok]').onclick=async()=>{
+    g.name=body.querySelector('[data-name]').value.trim();
+    g.season=body.querySelector('[data-season]').value;
+    const pending=body.querySelector('[data-newgym]').value.trim(); if(pending) addGym();
+    g.gyms=g.gyms.filter(x=>x.name.trim()).map(x=>({...x,name:x.name.trim()}));
+    if(!g.name){ toast('Donne un nom au groupe'); return body.querySelector('[data-name]').focus(); }
+    if(!g.gyms.length){ toast('Ajoute au moins une gym'); return; }
+    if(!g.slots.length){ toast('Ajoute au moins un entraînement'); return; }
+    if(g.slots.some(s=>!s.start||!s.end||prSlotMinutes(s)<=0)){ toast('Vérifie les horaires'); return; }
+    const ids=new Set(g.gyms.map(x=>x.id));
+    Object.values(g.presence).forEach(p=>Object.keys(p).forEach(k=>{ if(!ids.has(k)) delete p[k]; }));
+    const i=S.attendance.groups.findIndex(x=>x.id===g.id);
+    if(i>=0) S.attendance.groups[i]=g; else S.attendance.groups.push(g);
+    await saveAttendance(); closeModal(); toast('Groupe enregistré');
+    nav('presence',{group:g.id});
+  };
+  modal(existing?'Modifier le groupe':'Créer votre groupe', body, {wide:true});
+  if(!existing) setTimeout(()=>body.querySelector('[data-name]').focus(),50);
+}
+
+/* ---------- Écran d'un groupe : tableau du mois + bilan ---------- */
+function presenceGroupScreen(g){
+  const n=el('<div></div>');
+  n.appendChild(header(g.name,`Saison ${g.season}`,[
+    {label:'Accueil',to:()=>{S.role=null;nav('home');}},
+    {label:'Entraîneur',to:()=>nav('trainerHome')},
+    {label:'Suivi de présence',to:()=>nav('presence')},
+    {label:g.name}
+  ]));
+  const months=prSeasonMonths(g);
+  let mi=S.params.month;
+  if(mi==null){ const t=new Date(); mi=months.findIndex(x=>x.y===t.getFullYear()&&x.m===t.getMonth()); if(mi<0) mi=0; }
+  const {y,m}=months[mi];
+  const go=(p)=>{ const sy=window.scrollY; nav('presence',{group:g.id,month:mi,bilan:S.params.bilan,...p}); window.scrollTo(0,sy); };
+
+  const bar=el(`<div class="btnrow" style="align-items:center;margin-bottom:12px">
+    <button class="btn sm line" data-prev ${mi===0?'disabled style="opacity:.4"':''}>‹</button>
+    <select class="inp" data-month style="flex:1;min-width:170px;max-width:240px;font-weight:700;padding:9px 10px">${months.map((x,i)=>`<option value="${i}" ${i===mi?'selected':''}>${PR_MONTHS[x.m]} ${x.y}</option>`).join('')}</select>
+    <button class="btn sm line" data-next ${mi===11?'disabled style="opacity:.4"':''}>›</button>
+    <button class="btn sm ghost" data-edit style="margin-left:auto">✏️ Modifier</button></div>`);
+  bar.querySelector('[data-prev]').onclick=()=>{ if(mi>0) go({month:mi-1}); };
+  bar.querySelector('[data-next]').onclick=()=>{ if(mi<11) go({month:mi+1}); };
+  bar.querySelector('[data-month]').onchange=e=>go({month:Number(e.target.value)});
+  bar.querySelector('[data-edit]').onclick=()=>presenceGroupForm(g);
+  n.appendChild(bar);
+
+  const sessions=prMonthSessions(g,y,m);
+  const card=el('<div class="card" style="padding:10px"></div>');
+  if(!sessions.length){
+    card.appendChild(el('<div class="empty">Aucun entraînement ce mois-ci.</div>'));
+  } else {
+    const today=prTodayKey();
+    const multi=new Set(); const seen={}; sessions.forEach(s=>{ if(seen[s.dk]) multi.add(s.dk); seen[s.dk]=1; });
+    const wrap=el('<div class="pr-tbl"></div>');
+    const tbl=el('<table></table>');
+    let h='<thead><tr><th class="pr-name">Nom</th>';
+    sessions.forEach((s,i)=>{
+      const c=g.cancelled[s.key];
+      h+=`<th class="pr-col ${c?'pr-cancel':''} ${s.dk===today?'pr-today':''}" data-col="${i}" title="Options de la séance">
+        <div>${PR_DAYS_S[s.date.getDay()]}</div><b>${pad2(s.date.getDate())}</b>
+        ${multi.has(s.dk)?`<small>${esc(s.slot.start)}</small>`:''}${c?'<small>annulée</small>':''}</th>`;
+    });
+    h+='</tr></thead><tbody>';
+    g.gyms.forEach(gym=>{
+      h+=`<tr><th class="pr-name">${esc(gym.name)}</th>`;
+      sessions.forEach((s,i)=>{
+        const c=g.cancelled[s.key]; const on=g.presence[s.key]&&g.presence[s.key][gym.id];
+        h+=`<td class="${c?'pr-cancel':''} ${s.dk===today?'pr-today':''}">${c?'':`<button class="pr-ck ${on?'on':''}" data-gym="${gym.id}" data-col="${i}" aria-label="Présente">${on?'✓':''}</button>`}</td>`;
+      });
+      h+='</tr>';
+    });
+    h+='<tr class="pr-total"><th class="pr-name">Présentes</th>';
+    sessions.forEach(s=>{ const p=g.presence[s.key]||{}; const c=g.cancelled[s.key]; h+=`<td class="${c?'pr-cancel':''}">${c?'':g.gyms.filter(x=>p[x.id]).length+'/'+g.gyms.length}</td>`; });
+    h+='</tr></tbody>';
+    tbl.innerHTML=h; wrap.appendChild(tbl); card.appendChild(wrap);
+    card.appendChild(el('<div class="meta" style="font-size:12px;color:var(--muted);margin-top:8px">Touche une case pour cocher la présence. Touche une date pour tout cocher ou annuler la séance (vacances, gymnase fermé…).</div>'));
+    tbl.querySelectorAll('.pr-ck').forEach(b=>b.onclick=async()=>{
+      const s=sessions[Number(b.dataset.col)]; const gid=b.dataset.gym;
+      const p=g.presence[s.key]||(g.presence[s.key]={});
+      if(p[gid]) delete p[gid]; else p[gid]=true;
+      if(!Object.keys(p).length) delete g.presence[s.key];
+      await saveAttendance(); go({});
+    });
+    tbl.querySelectorAll('th.pr-col').forEach(th=>th.onclick=()=>presenceSessionMenu(g,sessions[Number(th.dataset.col)],()=>go({})));
+  }
+  n.appendChild(card);
+
+  /* Bilan */
+  const mode=S.params.bilan||'saison';
+  n.appendChild(el('<h2>Bilan de présence</h2>'));
+  const tabs=el(`<div class="pill-tabs"><button data-b="mois">${PR_MONTHS[m]} ${y}</button><button data-b="saison">Saison ${esc(g.season)}</button></div>`);
+  tabs.querySelectorAll('button').forEach(b=>{ if(b.dataset.b===mode) b.classList.add('on'); b.onclick=()=>go({bilan:b.dataset.b}); });
+  n.appendChild(tabs);
+  const stats=prStats(g, mode==='mois'?sessions:prSeasonSessions(g));
+  const total=stats.length?stats[0].total:0;
+  if(!total){
+    n.appendChild(el('<div class="empty">Pas encore de séance pointée sur cette période.</div>'));
+    return n;
+  }
+  n.appendChild(el(`<p class="sub">${total} séance(s) réalisée(s) sur la période (les séances annulées ou sans aucune présence cochée ne comptent pas).</p>`));
+  const list=el('<div class="pr-stats"></div>');
+  stats.slice().sort((a,b)=>b.pct-a.pct || a.gym.name.localeCompare(b.gym.name,'fr')).forEach(st=>{
+    const col=prColor(st.pct);
+    list.appendChild(el(`<div class="pr-stat">
+      <div class="pr-ring" style="background:conic-gradient(${col} ${st.pct*3.6}deg,#e6eaf3 0)"><span>${st.pct}%</span></div>
+      <div style="flex:1;min-width:0">
+        <div style="font-weight:800">${esc(st.gym.name)}</div>
+        <div class="pr-bar"><i style="width:${st.pct}%;background:${col}"></i></div>
+        <div class="meta" style="font-size:12.5px;color:var(--muted)">${st.present}/${st.total} séances · ${prHours(st.mins)} d'entraînement</div>
+      </div></div>`));
+  });
+  n.appendChild(list);
+  return n;
+}
+
+function presenceSessionMenu(g,s,refresh){
+  const c=!!g.cancelled[s.key];
+  const label=`${PR_DAYS[s.date.getDay()]} ${pad2(s.date.getDate())} ${PR_MONTHS[s.date.getMonth()].toLowerCase()} · ${s.slot.start} – ${s.slot.end}`;
+  const body=el(`<div><p style="margin:0 0 14px;font-weight:700">${esc(label)}</p>
+    <div style="display:flex;flex-direction:column;gap:8px">
+      ${c?'':'<button class="btn" data-all>✓ Toutes présentes</button><button class="btn line" data-none>Tout décocher</button>'}
+      <button class="btn ${c?'':'danger'}" data-cancel>${c?'Rétablir la séance':'Séance annulée (vacances, gymnase fermé…)'}</button>
+      <button class="btn ghost" data-x>Fermer</button></div></div>`);
+  const done=async()=>{ await saveAttendance(); closeModal(); refresh(); };
+  const all=body.querySelector('[data-all]'); if(all) all.onclick=()=>{ g.presence[s.key]={}; g.gyms.forEach(x=>g.presence[s.key][x.id]=true); done(); };
+  const none=body.querySelector('[data-none]'); if(none) none.onclick=()=>{ delete g.presence[s.key]; done(); };
+  body.querySelector('[data-cancel]').onclick=()=>{ if(c) delete g.cancelled[s.key]; else { g.cancelled[s.key]=true; delete g.presence[s.key]; } done(); };
+  body.querySelector('[data-x]').onclick=closeModal;
+  modal('Séance',body);
+}
+
+/* ============================================================
    ROUTES
    ============================================================ */
 const ROUTES = {
-  trainerHome, gyms:gymsScreen, gymProfile, build:buildScreen, formation:formationScreen, admin:adminScreen
+  trainerHome, gyms:gymsScreen, gymProfile, build:buildScreen, formation:formationScreen, presence:presenceScreen, admin:adminScreen
 };
 
 /* ============================================================
