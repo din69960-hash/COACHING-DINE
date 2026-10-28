@@ -5,6 +5,15 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="referrer" content="strict-origin-when-cross-origin">
 <title>Coaching Dine — Entraînement</title>
+<!-- PWA : icône écran d'accueil + mode application -->
+<link rel="manifest" href="manifest.json">
+<meta name="theme-color" content="#000000">
+<link rel="icon" type="image/png" href="favicon.png">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Coaching Dine">
 <style>
   :root{
     --ink:#12172b; --ink2:#1c2340; --panel:#ffffff; --bg:#eef1f7;
@@ -2288,6 +2297,12 @@ async function boot(){
 boot();
 return {S,nav};
 })();
+</script>
+<script>
+/* PWA : enregistrement du service worker */
+if('serviceWorker' in navigator){
+  window.addEventListener('load',()=>{ navigator.serviceWorker.register('sw.js').catch(()=>{}); });
+}
 </script>
 </body>
 </html>
