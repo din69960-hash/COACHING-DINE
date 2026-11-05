@@ -898,6 +898,40 @@ function moveGymModal(g, backParams){
   };
   modal('Déplacer le programme',b);
 }
+function cloneGymDeep(g){
+  const c=JSON.parse(JSON.stringify(g));
+  c.id=uid(); c.createdAt=Date.now(); delete c._draft;
+  (c.sessions||[]).forEach(s=>{ s.id=uid(); });
+  return c;
+}
+function copyGymModal(g, backParams){
+  const cur=gymFolderOf(g);
+  const targets=[{id:null,name:'Liste principale (hors dossier)'}, ...S.gymFolders.slice().sort(byOrder)].filter(f=>f.id!==cur);
+  const chosen=new Set();
+  const b=el(`<div><p class="muted" style="margin-top:0">« ${esc(g.name)} » reste à sa place. Une copie, avec toutes ses séances, est ajoutée dans chaque dossier choisi.</p></div>`);
+  targets.forEach(f=>{
+    const key=f.id||'';
+    const it=el(`<div class="list-item selectable"><div class="name grow">${f.id?'📁 ':''}${esc(f.name)}</div>
+      <div class="check" style="width:26px;height:26px;flex:none;border-radius:50%;border:2px solid var(--line);display:flex;align-items:center;justify-content:center;font-weight:900;color:#fff"></div></div>`);
+    const c=it.querySelector('.check');
+    const paint=()=>{ const on=chosen.has(key); it.classList.toggle('sel',on); c.style.background=on?'var(--ok)':'#fff'; c.style.borderColor=on?'var(--ok)':'var(--line)'; c.textContent=on?'✓':''; };
+    it.onclick=()=>{ chosen.has(key)?chosen.delete(key):chosen.add(key); paint(); };
+    paint(); b.appendChild(it);
+  });
+  const foot=el(`<div class="btnrow" style="justify-content:flex-end;margin-top:12px">
+    <button class="btn ghost" data-x>Annuler</button><button class="btn" data-ok>Copier</button></div>`);
+  foot.querySelector('[data-x]').onclick=closeModal;
+  foot.querySelector('[data-ok]').onclick=async()=>{
+    if(!chosen.size){ toast('Choisis au moins un dossier'); return; }
+    for(const key of chosen){
+      const c=cloneGymDeep(g); c.folderId=key||null; c.order=nextOrder();
+      await saveGym(c); S.gymnasts.push(c);
+    }
+    closeModal(); toast('Copié dans '+chosen.size+' dossier(s)'); nav('gyms',backParams);
+  };
+  b.appendChild(foot);
+  modal('Copier le programme', b);
+}
 function gymsScreen(){
   ensureGymOrder();
   const fid=S.params.gf||null;
@@ -972,11 +1006,12 @@ function gymsScreen(){
         <div class="name grow">${esc(g.name)}</div>
         <div class="meta">${nb?nb+' séance(s)':'—'}</div>
         <button class="btn sm" data-open>Ouvrir</button>
-        ${(S.gymFolders.length||folder)?'<button class="btn sm ghost" data-move>Déplacer</button>':''}
+        ${(S.gymFolders.length||folder)?'<button class="btn sm ghost" data-move>Déplacer</button><button class="btn sm ghost" data-copy>Copier</button>':''}
         <button class="btn sm danger" data-del>Suppr.</button>
       </div>`);
       it.querySelector('[data-open]').onclick=()=>nav('gymProfile',{id:g.id});
       const mv=it.querySelector('[data-move]'); if(mv) mv.onclick=()=>moveGymModal(g,here);
+      const cp=it.querySelector('[data-copy]'); if(cp) cp.onclick=()=>copyGymModal(g,here);
       it.querySelector('[data-del]').onclick=()=>confirmModal('Supprimer',`Supprimer le programme « ${g.name} » et ses séances ?`,async()=>{
         await DB.del('gymnasts',g.id); cloudRemove('gymnasts',g.id); S.gymnasts=S.gymnasts.filter(x=>x.id!==g.id); toast('Supprimé'); nav('gyms',here);
       });
@@ -1248,22 +1283,62 @@ async function commitSession(g,items){
 }
 /* Envoyer un programme à une ou plusieurs gyms (apparait dans "Poursuivre le programme") */
 function sendProgramModal(progName, buildItem){
-  const gyms=S.gymnasts.slice().sort((a,b)=>a.name.localeCompare(b.name));
+  ensureGymOrder();
   const selected=new Set();
   const body=el('<div></div>');
-  if(!gyms.length){
+  const groups=[
+    ...S.gymFolders.slice().sort(byOrder).map(f=>({folder:f, gyms:gymsInFolder(f.id)})),
+    {folder:null, gyms:gymsInFolder(null)}
+  ].filter(gr=>gr.gyms.length || gr.folder);
+  if(!S.gymnasts.length){
     body.appendChild(el('<div class="empty">Aucun programme créé.<br>Ajoute-en dans « Choisir votre programme ».</div>'));
   } else {
-    body.appendChild(el(`<p class="muted" style="margin-top:0">Sélectionne les programmes qui recevront « ${esc(progName)} » dans « Poursuivre le programme ».</p>`));
-    gyms.forEach(g=>{
-      const it=el(`<div class="list-item selectable">
-        <div class="name grow">${esc(g.name)}</div>
-        <div class="check" style="width:26px;height:26px;border-radius:50%;border:2px solid var(--line);display:flex;align-items:center;justify-content:center;font-weight:900;color:#fff"></div>
-      </div>`);
-      const paint=()=>{ const on=selected.has(g.id); it.classList.toggle('sel',on); const c=it.querySelector('.check'); c.style.background=on?'var(--ok)':'#fff'; c.style.borderColor=on?'var(--ok)':'var(--line)'; c.textContent=on?'✓':''; };
-      it.onclick=()=>{ selected.has(g.id)?selected.delete(g.id):selected.add(g.id); paint(); };
-      paint(); body.appendChild(it);
+    body.appendChild(el(`<p class="muted" style="margin-top:0">Sélectionne les programmes qui recevront « ${esc(progName)} » dans « Poursuivre le programme ». Touche un dossier pour l’ouvrir, ou sa case pour cocher tout le dossier.</p>`));
+    const checkHTML='<div class="check" style="width:26px;height:26px;flex:none;border-radius:50%;border:2px solid var(--line);display:flex;align-items:center;justify-content:center;font-weight:900;color:#fff"></div>';
+    const paintCheck=(c,state)=>{ // state : 0 vide, 1 partiel, 2 complet
+      c.style.background=state===2?'var(--ok)':state===1?'#9fd8b4':'#fff';
+      c.style.borderColor=state?'var(--ok)':'var(--line)';
+      c.textContent=state===2?'✓':state===1?'–':'';
+    };
+    const painters=[];
+    const repaint=()=>painters.forEach(fn=>fn());
+    groups.forEach(gr=>{
+      const wrap=el('<div></div>');
+      const inner=el(`<div style="${gr.folder?'margin-left:18px':''}"></div>`);
+      if(gr.folder){
+        const head=el(`<div class="list-item gl-folder" style="cursor:pointer">
+          <span data-chev style="width:16px;font-weight:900">▸</span>
+          <div class="grow"><div class="name">📁 ${esc(gr.folder.name)}</div><div class="meta">${gr.gyms.length} programme(s)</div></div>
+          ${gr.gyms.length?checkHTML:''}</div>`);
+        let open=false; inner.style.display='none';
+        const chev=head.querySelector('[data-chev]');
+        head.onclick=(e)=>{
+          if(e.target.closest('.check')){
+            const all=gr.gyms.every(g=>selected.has(g.id));
+            gr.gyms.forEach(g=>all?selected.delete(g.id):selected.add(g.id));
+            if(!open){ open=true; inner.style.display=''; chev.textContent='▾'; }
+            repaint(); return;
+          }
+          open=!open; inner.style.display=open?'':'none'; chev.textContent=open?'▾':'▸';
+        };
+        const c=head.querySelector('.check');
+        if(c) painters.push(()=>{ const n=gr.gyms.filter(g=>selected.has(g.id)).length; paintCheck(c, n===0?0:n===gr.gyms.length?2:1); });
+        if(!gr.gyms.length) inner.appendChild(el('<div class="muted" style="font-size:12.5px;padding:4px 0 8px">Dossier vide.</div>'));
+        wrap.appendChild(head);
+      } else if(gr.gyms.length && S.gymFolders.length){
+        wrap.appendChild(el('<div class="muted" style="font-size:12.5px;margin:10px 0 4px">Hors dossier</div>'));
+      }
+      gr.gyms.forEach(g=>{
+        const it=el(`<div class="list-item selectable"><div class="name grow">${esc(g.name)}</div>${checkHTML}</div>`);
+        const c=it.querySelector('.check');
+        painters.push(()=>{ const on=selected.has(g.id); it.classList.toggle('sel',on); paintCheck(c,on?2:0); });
+        it.onclick=()=>{ selected.has(g.id)?selected.delete(g.id):selected.add(g.id); repaint(); };
+        inner.appendChild(it);
+      });
+      wrap.appendChild(inner);
+      body.appendChild(wrap);
     });
+    repaint();
   }
   const foot=el(`<div class="btnrow" style="justify-content:flex-end;margin-top:12px">
     <button class="btn ghost" data-x>Annuler</button>
