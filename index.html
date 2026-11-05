@@ -2004,10 +2004,14 @@ function buildMedia(){
   const fileInput=dz.querySelector('input');
   const handleFiles=async(files)=>{
     if(!CLOUD_ENABLED || !Cloud.online){ toast("Connexion au cloud requise pour ajouter des médias"); return; }
-    let okCount=0;
+    let okCount=0, lastErr='';
     toast("Envoi de "+files.length+" fichier(s)…");
-    for(const f of files){
-      const type=f.type.startsWith('video')?'video':'image';
+    for(const f0 of files){
+      // Certains téléphones ne donnent pas le type du fichier : on le déduit de l'extension
+      const e0=(f0.name.match(/\.([^.]+)$/)||[])[1]||'';
+      const mimeGuess={mp4:'video/mp4',mov:'video/quicktime',webm:'video/webm','3gp':'video/3gpp',m4v:'video/mp4',jpg:'image/jpeg',jpeg:'image/jpeg',png:'image/png',webp:'image/webp',heic:'image/heic',gif:'image/gif'}[e0.toLowerCase()];
+      const f=(!f0.type && mimeGuess) ? new File([f0],f0.name,{type:mimeGuess}) : f0;
+      const type=(f.type||'').startsWith('video')?'video':'image';
       const id=uid();
       const extMatch=f.name.match(/\.[^.]+$/); const ext=extMatch?extMatch[0]:(type==='video'?'.mp4':'.jpg');
       const path=id+ext;
@@ -2015,9 +2019,11 @@ function buildMedia(){
         const url=await Cloud.uploadFile(path,f);
         const m={id,folder:folderId,type,name:f.name.replace(/\.[^.]+$/,''),url,path,createdAt:Date.now()};
         await DB.put('media',m); S.media.push(m); await Cloud.upsertMedia(m); okCount++;
-      }catch(e){ console.warn("upload echoue", e); }
+      }catch(e){ console.warn("upload echoue", e); lastErr=(e&&(e.message||e.error||e.statusCode))||String(e); }
     }
-    if(okCount) toast(okCount+" fichier(s) envoyé(s)"); else toast("Échec de l'envoi");
+    if(okCount && !lastErr) toast(okCount+" fichier(s) envoyé(s)");
+    else if(okCount) toast(okCount+"/"+files.length+" envoyé(s) — erreur : "+lastErr);
+    else toast("Échec de l'envoi : "+(lastErr||"raison inconnue"));
     nav('build',{tab:'media',folder:folderId});
   };
   fileInput.onchange=()=>handleFiles([...fileInput.files]);
